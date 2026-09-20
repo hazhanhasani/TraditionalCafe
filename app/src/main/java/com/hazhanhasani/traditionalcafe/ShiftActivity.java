@@ -129,7 +129,9 @@ public class ShiftActivity extends Activity {
                 JSONObject current = ApiClient.get(this, "/api/shifts/current");
                 JSONObject history = ApiClient.get(
                         this,
-                        "staff".equals(role) ? "/api/shifts/my?limit=30" : "/api/shifts?limit=100"
+                        PermissionStore.has(this, "view_all_shifts")
+                                ? "/api/shifts?limit=100"
+                                : "/api/shifts/my?limit=30"
                 );
                 currentShift = current.optJSONObject("shift");
                 JSONArray shifts = history.optJSONArray("shifts");
@@ -156,7 +158,9 @@ public class ShiftActivity extends Activity {
         }
 
         TextView historyTitle = text(
-                "staff".equals(role) ? "شیفت‌های قبلی من" : "آخرین شیفت‌های کاربران",
+                PermissionStore.has(this, "view_all_shifts")
+                        ? "آخرین شیفت‌های کاربران"
+                        : "شیفت‌های قبلی من",
                 17, ink, true
         );
         historyTitle.setGravity(Gravity.RIGHT);
@@ -347,7 +351,7 @@ public class ShiftActivity extends Activity {
             String userName = shift.optString("user_name", "");
             String status = shift.optString("status", "closed");
             String titleText = "شیفت #" + JalaliDateTime.fa(String.valueOf(shift.optLong("id")));
-            if (!"staff".equals(role) && !userName.isEmpty()) {
+            if (PermissionStore.has(this, "view_all_shifts") && !userName.isEmpty()) {
                 titleText += " • " + userName;
             }
 
