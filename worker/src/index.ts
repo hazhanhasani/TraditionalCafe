@@ -679,9 +679,10 @@ async function route(request, env) {
   }
 
   if (path === "/api/hookahs" && method === "GET") {
-    const result = await env.DB.prepare(
-      "SELECT id, name, price, cost, active FROM hookah_catalog WHERE active=1 ORDER BY name",
-    ).all();
+    const query = user.role === "staff"
+      ? "SELECT id, name, price, active FROM hookah_catalog WHERE active=1 ORDER BY name"
+      : "SELECT id, name, price, cost, active FROM hookah_catalog WHERE active=1 ORDER BY name";
+    const result = await env.DB.prepare(query).all();
     return json({ ok: true, items: result.results || [] });
   }
 
