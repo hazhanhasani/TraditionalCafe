@@ -778,6 +778,8 @@ public class MainActivity extends Activity {
 
         new Thread(() -> {
             try {
+                JSONObject timeData = ApiClient.get(this, "/api/time");
+                JalaliDateTime.syncServerUtc(timeData.optString("utc", ""));
                 JSONObject data = ApiClient.get(this, "/api/dashboard");
                 JSONObject tablesData = ApiClient.get(this, "/api/tables");
 
@@ -809,6 +811,7 @@ public class MainActivity extends Activity {
                 JSONArray tables = tablesData.optJSONArray("tables");
 
                 runOnUiThread(() -> {
+                    if (jalaliClockView != null) jalaliClockView.setText(JalaliDateTime.nowFull());
                     if (salesAmountView != null) salesAmountView.setText(formatMoney(sales));
                     if (hookahMetricView != null) hookahMetricView.setText(JalaliDateTime.fa(String.valueOf(hookahs)));
                     if (debtMetricView != null) debtMetricView.setText(formatMoney(debt));
