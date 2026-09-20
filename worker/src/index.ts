@@ -884,11 +884,15 @@ async function route(request, env) {
 
   if (path === "/api/health" && method === "GET") {
     const db = await env.DB.prepare("SELECT 1 AS ok").first();
+    const backupSchema = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('backup_snapshots','backup_snapshot_chunks')"
+    ).first();
     return json({
       ok: true,
       service: "TraditionalCafe API",
       database: db?.ok === 1 ? "ready" : "unknown",
       timezone: IRAN_TIME_ZONE,
+      backup_recovery: Number(backupSchema?.count || 0) === 2 ? "ready" : "migration_pending",
     });
   }
 
