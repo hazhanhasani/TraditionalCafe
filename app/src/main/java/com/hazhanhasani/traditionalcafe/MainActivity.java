@@ -684,6 +684,9 @@ public class MainActivity extends Activity {
             if (PermissionStore.has(this, "view_reports")) {
                 grid.addView(actionTile("گزارش‌ها", "سود و زیان و عملکرد", R.drawable.ic_chart, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
             }
+            if (PermissionStore.has(this, "view_audit_log")) {
+                grid.addView(actionTile("مرکز فعالیت‌ها", "تغییرات، عملیات حساس و فعالیت کاربران", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
+            }
             if (isAdmin()) {
                 grid.addView(actionTile("کاربران و دسترسی‌ها", "ساخت حساب، نقش، رمز و فعالیت", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
             }
@@ -838,6 +841,8 @@ public class MainActivity extends Activity {
             openModule("settlement");
         } else if ("گزارش‌ها".equals(title)) {
             startActivity(new Intent(this, DailyReportActivity.class));
+        } else if ("مرکز فعالیت‌ها".equals(title)) {
+            startActivity(new Intent(this, AuditLogActivity.class));
         }
     }
 
