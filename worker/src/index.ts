@@ -18,7 +18,8 @@ const ROLE_PERMISSION_KEYS = [
   "view_reports",
   "reverse_settlement",
   "apply_discount",
-  "view_all_shifts"
+  "view_all_shifts",
+  "manage_inventory"
 ];
 
 function json(body, status = 200) {
@@ -869,7 +870,10 @@ async function route(request, env) {
       "hookah_catalog",
       "service_catalog",
       "audit_logs",
-      "cash_shifts"
+      "cash_shifts",
+      "inventory_items",
+      "inventory_movements",
+      "catalog_inventory_links"
     ];
 
     for (const table of tables) {
@@ -1156,6 +1160,330 @@ async function route(request, env) {
   }
 
 
+  if (path === "/api/inventory" && method === "GET") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    }
+
+    const includeAll = url.searchParams.get("all") === "1";
+    const result = await env.DB.prepare(
+      `SELECT id, name, unit, stock_qty, min_stock, purchase_price, active,
+              created_at, updated_at,
+              CASE
+                WHEN stock_qty <= 0 THEN 'out'
+                WHEN stock_qty <= min_stock THEN 'low'
+                ELSE 'ok'
+              END AS stock_status
+       FROM inventory_items
+       ${includeAll ? "" : "WHERE active=1"}
+       ORDER BY
+         CASE WHEN stock_qty <= min_stock THEN 0 ELSE 1 END,
+         active DESC, name`
+    ).all();
+
+    const summary = await env.DB.prepare(
+      `SELECT
+          COUNT(*) AS total_items,
+          COALESCE(SUM(CASE WHEN active=1 THEN 1 ELSE 0 END),0) AS active_items,
+          COALESCE(SUM(CASE WHEN active=1 AND stock_qty<=min_stock THEN 1 ELSE 0 END),0) AS low_stock_items,
+          COALESCE(SUM(stock_qty * purchase_price),0) AS inventory_value
+       FROM inventory_items`
+    ).first();
+
+    return json({
+      ok: true,
+      items: result.results || [],
+      summary: {
+        total_items: Number(summary?.total_items || 0),
+        active_items: Number(summary?.active_items || 0),
+        low_stock_items: Number(summary?.low_stock_items || 0),
+        inventory_value: Number(summary?.inventory_value || 0),
+      },
+    });
+  }
+
+  if (path === "/api/inventory" && method === "POST") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    }
+
+    const data = await bodyJson(request);
+    const name = String(data.name || "").trim();
+    const unit = String(data.unit || "عدد").trim().slice(0, 30);
+    const openingStock = intAmount(data.opening_stock || 0);
+    const minStock = intAmount(data.min_stock || 0);
+    const purchasePrice = intAmount(data.purchase_price || 0);
+
+    if (!name || name.length > 100 || !unit || openingStock === null ||
+        minStock === null || purchasePrice === null) {
+      return error("invalid_input", "اطلاعات کالای انبار معتبر نیست.");
+    }
+
+    try {
+      const result = await env.DB.prepare(
+        `INSERT INTO inventory_items
+         (name,unit,stock_qty,min_stock,purchase_price,active)
+         VALUES (?,?,?,?,?,1)`
+      ).bind(name, unit, openingStock, minStock, purchasePrice).run();
+
+      const id = Number(result.meta.last_row_id);
+
+      if (openingStock > 0) {
+        await env.DB.prepare(
+          `INSERT INTO inventory_movements
+           (item_id,movement_type,qty_delta,unit_cost,note,created_by)
+           VALUES (?,?,?,?,?,?)`
+        ).bind(
+          id, "opening", openingStock, purchasePrice,
+          "موجودی اولیه", user.id
+        ).run();
+      }
+
+      await audit(env, user.id, "create_inventory_item", "inventory_item", id, {
+        name, unit, opening_stock: openingStock,
+        min_stock: minStock, purchase_price: purchasePrice
+      });
+
+      return json({
+        ok: true, id, name, unit,
+        stock_qty: openingStock,
+        min_stock: minStock,
+        purchase_price: purchasePrice,
+        active: 1,
+      }, 201);
+    } catch (e) {
+      return error("inventory_exists", "کالایی با این نام قبلاً در انبار ثبت شده است.", 409);
+    }
+  }
+
+  const inventoryItem = path.match(/^\/api\/inventory\/(\d+)$/);
+  if (inventoryItem && method === "PATCH") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    }
+
+    const id = Number(inventoryItem[1]);
+    const current = await env.DB.prepare(
+      "SELECT * FROM inventory_items WHERE id=?"
+    ).bind(id).first();
+    if (!current) return error("not_found", "کالای انبار پیدا نشد.", 404);
+
+    const data = await bodyJson(request);
+    const name = data.name === undefined ? current.name : String(data.name).trim();
+    const unit = data.unit === undefined ? current.unit : String(data.unit).trim().slice(0, 30);
+    const minStock = data.min_stock === undefined
+      ? Number(current.min_stock)
+      : intAmount(data.min_stock);
+    const purchasePrice = data.purchase_price === undefined
+      ? Number(current.purchase_price)
+      : intAmount(data.purchase_price);
+    const active = data.active === undefined ? Number(current.active) : (data.active ? 1 : 0);
+
+    if (!name || !unit || minStock === null || purchasePrice === null) {
+      return error("invalid_input", "اطلاعات کالای انبار معتبر نیست.");
+    }
+
+    try {
+      await env.DB.prepare(
+        `UPDATE inventory_items
+         SET name=?, unit=?, min_stock=?, purchase_price=?, active=?,
+             updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
+      ).bind(name, unit, minStock, purchasePrice, active, id).run();
+
+      await audit(env, user.id, "update_inventory_item", "inventory_item", id, {
+        name, unit, min_stock: minStock, purchase_price: purchasePrice, active
+      });
+
+      return json({
+        ok: true, id, name, unit,
+        stock_qty: Number(current.stock_qty),
+        min_stock: minStock,
+        purchase_price: purchasePrice,
+        active,
+      });
+    } catch (e) {
+      return error("inventory_exists", "کالایی با این نام قبلاً در انبار ثبت شده است.", 409);
+    }
+  }
+
+  const inventoryMovements = path.match(/^\/api\/inventory\/(\d+)\/movements$/);
+  if (inventoryMovements && method === "GET") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    }
+
+    const itemId = Number(inventoryMovements[1]);
+    const item = await env.DB.prepare(
+      "SELECT * FROM inventory_items WHERE id=?"
+    ).bind(itemId).first();
+    if (!item) return error("not_found", "کالای انبار پیدا نشد.", 404);
+
+    const movements = await env.DB.prepare(
+      `SELECT m.*, u.name AS created_by_name
+       FROM inventory_movements m
+       JOIN users u ON u.id=m.created_by
+       WHERE m.item_id=?
+       ORDER BY m.id DESC
+       LIMIT 200`
+    ).bind(itemId).all();
+
+    return json({ ok: true, item, movements: movements.results || [] });
+  }
+
+  if (inventoryMovements && method === "POST") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    }
+
+    const itemId = Number(inventoryMovements[1]);
+    const item = await env.DB.prepare(
+      "SELECT * FROM inventory_items WHERE id=?"
+    ).bind(itemId).first();
+    if (!item) return error("not_found", "کالای انبار پیدا نشد.", 404);
+
+    const data = await bodyJson(request);
+    const movementType = String(data.type || "");
+    const qty = intAmount(data.qty);
+    const unitCost = data.unit_cost === undefined
+      ? Number(item.purchase_price || 0)
+      : intAmount(data.unit_cost);
+    const note = String(data.note || "").trim().slice(0, 300);
+
+    const incoming = ["purchase","adjustment_in"].includes(movementType);
+    const outgoing = ["adjustment_out","waste"].includes(movementType);
+    if ((!incoming && !outgoing) || !qty || qty <= 0 || unitCost === null) {
+      return error("invalid_movement", "نوع و مقدار گردش انبار معتبر نیست.");
+    }
+
+    const delta = incoming ? qty : -qty;
+    if (Number(item.stock_qty || 0) + delta < 0) {
+      return error("insufficient_stock", "موجودی برای این خروج کافی نیست.", 409, {
+        available: Number(item.stock_qty || 0),
+        requested: qty,
+      });
+    }
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE inventory_items
+         SET stock_qty=stock_qty+?,
+             purchase_price=CASE WHEN ?='purchase' THEN ? ELSE purchase_price END,
+             updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
+      ).bind(delta, movementType, unitCost, itemId),
+      env.DB.prepare(
+        `INSERT INTO inventory_movements
+         (item_id,movement_type,qty_delta,unit_cost,note,created_by)
+         VALUES (?,?,?,?,?,?)`
+      ).bind(itemId, movementType, delta, unitCost, note || null, user.id),
+    ]);
+
+    await audit(env, user.id, "inventory_movement", "inventory_item", itemId, {
+      type: movementType, qty, delta, unit_cost: unitCost, note
+    });
+
+    const updated = await env.DB.prepare(
+      "SELECT id,name,unit,stock_qty,min_stock,purchase_price,active FROM inventory_items WHERE id=?"
+    ).bind(itemId).first();
+
+    return json({ ok: true, item: updated });
+  }
+
+  if (path === "/api/inventory-links" && method === "GET") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    }
+
+    const rows = await env.DB.prepare(
+      `SELECT l.id, l.catalog_type, l.catalog_id, l.inventory_item_id,
+              l.qty_per_unit, ii.name AS inventory_name, ii.unit,
+              ii.stock_qty, ii.min_stock,
+              CASE
+                WHEN l.catalog_type='hookah' THEN h.name
+                ELSE s.name
+              END AS catalog_name
+       FROM catalog_inventory_links l
+       JOIN inventory_items ii ON ii.id=l.inventory_item_id
+       LEFT JOIN hookah_catalog h
+         ON l.catalog_type='hookah' AND h.id=l.catalog_id
+       LEFT JOIN service_catalog s
+         ON l.catalog_type='service' AND s.id=l.catalog_id
+       ORDER BY l.catalog_type, catalog_name, ii.name`
+    ).all();
+
+    return json({ ok: true, links: rows.results || [] });
+  }
+
+  if (path === "/api/inventory-links" && method === "POST") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    }
+
+    const data = await bodyJson(request);
+    const catalogType = String(data.catalog_type || "").toLowerCase();
+    const catalogId = Number(data.catalog_id || 0);
+    const inventoryItemId = Number(data.inventory_item_id || 0);
+    const qtyPerUnit = intAmount(data.qty_per_unit);
+
+    if (!["hookah","service"].includes(catalogType) ||
+        !catalogId || !inventoryItemId || !qtyPerUnit || qtyPerUnit <= 0) {
+      return error("invalid_link", "اتصال منو به انبار معتبر نیست.");
+    }
+
+    const catalogTable = catalogType === "hookah" ? "hookah_catalog" : "service_catalog";
+    const catalog = await env.DB.prepare(
+      `SELECT id,name FROM ${catalogTable} WHERE id=?`
+    ).bind(catalogId).first();
+    if (!catalog) return error("catalog_item_not_found", "آیتم منو پیدا نشد.", 404);
+
+    const inventory = await env.DB.prepare(
+      "SELECT id,name FROM inventory_items WHERE id=? AND active=1"
+    ).bind(inventoryItemId).first();
+    if (!inventory) return error("inventory_item_not_found", "کالای فعال انبار پیدا نشد.", 404);
+
+    try {
+      const result = await env.DB.prepare(
+        `INSERT INTO catalog_inventory_links
+         (catalog_type,catalog_id,inventory_item_id,qty_per_unit)
+         VALUES (?,?,?,?)`
+      ).bind(catalogType, catalogId, inventoryItemId, qtyPerUnit).run();
+
+      const id = Number(result.meta.last_row_id);
+      await audit(env, user.id, "create_inventory_link", "inventory_link", id, {
+        catalog_type: catalogType,
+        catalog_id: catalogId,
+        inventory_item_id: inventoryItemId,
+        qty_per_unit: qtyPerUnit,
+      });
+
+      return json({ ok: true, id }, 201);
+    } catch (e) {
+      return error("link_exists", "این اتصال قبلاً تعریف شده است.", 409);
+    }
+  }
+
+  const inventoryLink = path.match(/^\/api\/inventory-links\/(\d+)$/);
+  if (inventoryLink && method === "DELETE") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    }
+
+    const id = Number(inventoryLink[1]);
+    const link = await env.DB.prepare(
+      "SELECT * FROM catalog_inventory_links WHERE id=?"
+    ).bind(id).first();
+    if (!link) return error("not_found", "اتصال انبار پیدا نشد.", 404);
+
+    await env.DB.prepare("DELETE FROM catalog_inventory_links WHERE id=?").bind(id).run();
+    await audit(env, user.id, "delete_inventory_link", "inventory_link", id, {
+      catalog_type: link.catalog_type,
+      catalog_id: Number(link.catalog_id),
+      inventory_item_id: Number(link.inventory_item_id),
+    });
+    return json({ ok: true });
+  }
+
   if (path === "/api/catalog" && method === "GET") {
     const type = String(url.searchParams.get("type") || "").toLowerCase();
     const privileged = requireRole(user, ["admin","cashier"]);
@@ -1354,9 +1682,12 @@ async function route(request, env) {
       }
     }
 
+    const linkedCatalogId =
+      ["hookah","service"].includes(catalogType) && catalogId > 0 ? catalogId : null;
+
     const result = await env.DB.prepare(
-      "INSERT INTO order_items (order_id,item_type,name,qty,unit_price,unit_cost,created_by) VALUES (?,?,?,?,?,?,?)"
-    ).bind(orderId, type, name, qty, unitPrice, unitCost, user.id).run();
+      "INSERT INTO order_items (order_id,item_type,catalog_id,name,qty,unit_price,unit_cost,created_by) VALUES (?,?,?,?,?,?,?,?)"
+    ).bind(orderId, type, linkedCatalogId, name, qty, unitPrice, unitCost, user.id).run();
 
     const totals = await recalcOrder(env, orderId);
     await audit(env, user.id, "add_order_item", "order_item", Number(result.meta.last_row_id), {
@@ -1629,7 +1960,16 @@ async function route(request, env) {
       "SELECT method, amount, customer_id FROM payments WHERE order_id=? ORDER BY id"
     ).bind(orderId).all();
 
-    await env.DB.batch([
+    const inventoryNet = await env.DB.prepare(
+      `SELECT item_id, SUM(qty_delta) AS net_delta
+       FROM inventory_movements
+       WHERE order_id=? AND movement_type IN ('sale','sale_reverse')
+       GROUP BY item_id
+       HAVING SUM(qty_delta)<0`
+    ).bind(orderId).all();
+
+    const reverseStatements = [
+
       env.DB.prepare("DELETE FROM customer_ledger WHERE order_id=? AND entry_type='debt'").bind(orderId),
       env.DB.prepare("DELETE FROM payments WHERE order_id=?").bind(orderId),
       env.DB.prepare(
@@ -1643,7 +1983,29 @@ async function route(request, env) {
              updated_at=CURRENT_TIMESTAMP
          WHERE id=?`
       ).bind(orderId),
-    ]);
+    ];
+
+    for (const row of inventoryNet.results || []) {
+      const restore = Math.abs(Number(row.net_delta || 0));
+      if (restore <= 0) continue;
+      reverseStatements.push(
+        env.DB.prepare(
+          "UPDATE inventory_items SET stock_qty=stock_qty+?, updated_at=CURRENT_TIMESTAMP WHERE id=?"
+        ).bind(restore, row.item_id)
+      );
+      reverseStatements.push(
+        env.DB.prepare(
+          `INSERT INTO inventory_movements
+           (item_id,movement_type,qty_delta,unit_cost,order_id,note,created_by)
+           VALUES (?,?,?,?,?,?,?)`
+        ).bind(
+          row.item_id, "sale_reverse", restore, 0, orderId,
+          "بازگشت خودکار موجودی پس از اصلاح تسویه", user.id
+        )
+      );
+    }
+
+    await env.DB.batch(reverseStatements);
 
     const totals = await recalcOrder(env, orderId);
     await audit(env, user.id, "reverse_settlement", "order", orderId, {
@@ -1717,6 +2079,14 @@ async function route(request, env) {
       "SELECT id FROM order_items WHERE order_id=?"
     ).bind(orderId).all();
 
+    const inventoryNet = await env.DB.prepare(
+      `SELECT item_id, SUM(qty_delta) AS net_delta
+       FROM inventory_movements
+       WHERE order_id=? AND movement_type IN ('sale','sale_reverse')
+       GROUP BY item_id
+       HAVING SUM(qty_delta)<0`
+    ).bind(orderId).all();
+
     const snapshot = {
       id: Number(current.id),
       table_id: Number(current.table_id),
@@ -1732,6 +2102,21 @@ async function route(request, env) {
       env.DB.prepare("DELETE FROM customer_ledger WHERE order_id=?").bind(orderId),
       env.DB.prepare("DELETE FROM payments WHERE order_id=?").bind(orderId),
     ];
+
+    for (const row of inventoryNet.results || []) {
+      const restore = Math.abs(Number(row.net_delta || 0));
+      if (restore > 0) {
+        statements.push(
+          env.DB.prepare(
+            "UPDATE inventory_items SET stock_qty=stock_qty+?, updated_at=CURRENT_TIMESTAMP WHERE id=?"
+          ).bind(restore, row.item_id)
+        );
+      }
+    }
+
+    statements.push(
+      env.DB.prepare("DELETE FROM inventory_movements WHERE order_id=?").bind(orderId)
+    );
 
     for (const row of itemIds.results || []) {
       statements.push(
@@ -1807,25 +2192,111 @@ async function route(request, env) {
       return error("payment_mismatch", "Payment total must equal order total.", 409, { expected: totals.total, received: paid });
     }
 
-    const statements = normalized.map((p) =>
-      env.DB.prepare(
-        "INSERT INTO payments (order_id,method,amount,customer_id,created_by,shift_id) VALUES (?,?,?,?,?,?)",
-      ).bind(orderId, p.method, p.amount, p.customer_id, user.id, shift.id)
-    );
-    if (statements.length) await env.DB.batch(statements);
+    const stockLinks = await env.DB.prepare(
+      `SELECT oi.id AS order_item_id, oi.name AS order_item_name, oi.qty,
+              l.inventory_item_id, l.qty_per_unit,
+              ii.name AS inventory_name, ii.stock_qty, ii.unit
+       FROM order_items oi
+       JOIN catalog_inventory_links l
+         ON l.catalog_type=oi.item_type AND l.catalog_id=oi.catalog_id
+       JOIN inventory_items ii ON ii.id=l.inventory_item_id
+       WHERE oi.order_id=? AND ii.active=1`
+    ).bind(orderId).all();
 
-    for (const p of normalized) {
-      if (p.method === "credit") {
-        await env.DB.prepare(
-          "INSERT INTO customer_ledger (customer_id,order_id,entry_type,amount,note,created_by) VALUES (?,?,?,?,?,?)",
-        ).bind(p.customer_id, orderId, "debt", p.amount, "نسیه سفارش", user.id).run();
+    const requiredByInventory = new Map();
+    for (const row of stockLinks.results || []) {
+      const inventoryId = Number(row.inventory_item_id);
+      const needed = Number(row.qty || 0) * Number(row.qty_per_unit || 0);
+      if (needed <= 0) continue;
+      const current = requiredByInventory.get(inventoryId) || {
+        needed: 0,
+        stock: Number(row.stock_qty || 0),
+        name: row.inventory_name,
+        unit: row.unit,
+      };
+      current.needed += needed;
+      requiredByInventory.set(inventoryId, current);
+    }
+
+    for (const [, required] of requiredByInventory) {
+      if (required.needed > required.stock) {
+        return error(
+          "insufficient_stock",
+          "موجودی «" + required.name + "» برای تسویه این سفارش کافی نیست.",
+          409,
+          {
+            inventory_name: required.name,
+            available: required.stock,
+            required: required.needed,
+            unit: required.unit,
+          }
+        );
       }
     }
 
-    await env.DB.prepare(
-      "UPDATE orders SET status='settled', closed_by=?, settled_shift_id=?, closed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-    ).bind(user.id, shift.id, orderId).run();
-    await audit(env, user.id, "settle_order", "order", orderId, { total: totals.total, payments: normalized });
+    const statements = normalized.map((p) =>
+      env.DB.prepare(
+        "INSERT INTO payments (order_id,method,amount,customer_id,created_by,shift_id) VALUES (?,?,?,?,?,?)"
+      ).bind(orderId, p.method, p.amount, p.customer_id, user.id, shift.id)
+    );
+
+    for (const p of normalized) {
+      if (p.method === "credit") {
+        statements.push(
+          env.DB.prepare(
+            "INSERT INTO customer_ledger (customer_id,order_id,entry_type,amount,note,created_by) VALUES (?,?,?,?,?,?)"
+          ).bind(p.customer_id, orderId, "debt", p.amount, "نسیه سفارش", user.id)
+        );
+      }
+    }
+
+    for (const [inventoryId, required] of requiredByInventory) {
+      statements.push(
+        env.DB.prepare(
+          `UPDATE inventory_items
+           SET stock_qty=stock_qty-?, updated_at=CURRENT_TIMESTAMP
+           WHERE id=?`
+        ).bind(required.needed, inventoryId)
+      );
+    }
+
+    for (const row of stockLinks.results || []) {
+      const consumed = Number(row.qty || 0) * Number(row.qty_per_unit || 0);
+      if (consumed <= 0) continue;
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO inventory_movements
+           (item_id,movement_type,qty_delta,unit_cost,order_id,order_item_id,note,created_by)
+           VALUES (?,?,?,?,?,?,?,?)`
+        ).bind(
+          row.inventory_item_id,
+          "sale",
+          -consumed,
+          0,
+          orderId,
+          row.order_item_id,
+          "مصرف خودکار فروش: " + row.order_item_name,
+          user.id
+        )
+      );
+    }
+
+    statements.push(
+      env.DB.prepare(
+        `UPDATE orders
+         SET status='settled', closed_by=?, settled_shift_id=?,
+             closed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
+      ).bind(user.id, shift.id, orderId)
+    );
+
+    await env.DB.batch(statements);
+
+    await audit(env, user.id, "settle_order", "order", orderId, {
+      total: totals.total,
+      payments: normalized,
+      inventory_items: requiredByInventory.size,
+    });
     return json({ ok: true, order_id: orderId, totals, payments: normalized });
   }
 
@@ -1966,7 +2437,9 @@ async function route(request, env) {
   }
 
   if (path === "/api/reports/summary" && method === "GET") {
-    if (!requireRole(user, ["admin","cashier"])) return error("forbidden", "Insufficient access.", 403);
+    if (!(await hasPermission(env, user, "view_reports"))) {
+      return error("forbidden", "مجوز مشاهده گزارش‌ها فعال نیست.", 403);
+    }
     const from = url.searchParams.get("from") || "1970-01-01";
     const to = url.searchParams.get("to") || "2999-12-31";
 
