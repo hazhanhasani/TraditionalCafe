@@ -2,6 +2,7 @@ package com.hazhanhasani.traditionalcafe;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -44,6 +45,7 @@ public class CustomerLedgerActivity extends Activity {
     private ProgressBar loading;
     private JSONObject customer;
     private JSONArray entries;
+    private JSONObject statement;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -135,6 +137,8 @@ public class CustomerLedgerActivity extends Activity {
                 customer = response.optJSONObject("customer");
                 entries = response.optJSONArray("entries");
                 if (entries == null) entries = new JSONArray();
+                statement = response.optJSONObject("statement");
+                if (statement == null) statement = new JSONObject();
 
                 runOnUiThread(this::render);
             } catch (Exception e) {
@@ -166,8 +170,27 @@ public class CustomerLedgerActivity extends Activity {
         LinearLayout.LayoutParams editLp = new LinearLayout.LayoutParams(0, dp(50), 1f);
         editLp.setMarginStart(dp(8));
         actions.addView(edit, editLp);
-
         content.addView(actions);
+
+        LinearLayout secondaryActions = new LinearLayout(this);
+        secondaryActions.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams secondaryLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        secondaryLp.topMargin = dp(8);
+        content.addView(secondaryActions, secondaryLp);
+
+        Button share = secondaryButton("اشتراک صورت‌حساب");
+        share.setOnClickListener(v -> shareStatement());
+        secondaryActions.addView(share, new LinearLayout.LayoutParams(0, dp(50), 1f));
+
+        if (PermissionStore.has(this, "adjust_customer_ledger")) {
+            Button adjustment = secondaryButton("اصلاح حساب");
+            adjustment.setOnClickListener(v -> showAdjustmentDialog());
+            LinearLayout.LayoutParams adjustmentLp = new LinearLayout.LayoutParams(0, dp(50), 1f);
+            adjustmentLp.setMarginStart(dp(8));
+            secondaryActions.addView(adjustment, adjustmentLp);
+        }
 
         TextView history = text("تاریخچه کامل گردش حساب", 17, ink, true);
         history.setGravity(Gravity.RIGHT);
@@ -235,6 +258,21 @@ public class CustomerLedgerActivity extends Activity {
             );
         }
 
+        if (statement != null && statement.optLong("transaction_count", 0L) > 0) {
+            addLine(
+                    card,
+                    "جمع نسیه‌ها",
+                    money(statement.optLong("debt_entries_total", 0L)),
+                    muted
+            );
+            addLine(
+                    card,
+                    "جمع پرداخت‌ها",
+                    money(statement.optLong("payments_total", 0L)),
+                    green
+            );
+        }
+
         String notes = customer.optString("notes", "");
         if (!notes.isEmpty()) {
             TextView note = text("یادداشت: " + notes, 11, muted, false);
@@ -293,6 +331,15 @@ public class CustomerLedgerActivity extends Activity {
             addLine(card, "سررسید", JalaliDateTime.formatUtcCompact(dueAt), brown);
         }
 
+        if (!entry.isNull("running_balance")) {
+            addLine(
+                    card,
+                    "مانده پس از این گردش",
+                    money(entry.optLong("running_balance", 0L)),
+                    entry.optLong("running_balance", 0L) > 0 ? red : green
+            );
+        }
+
         String by = entry.optString("created_by_name", "");
         String created = entry.optString("created_at", "");
         TextView meta = text(
@@ -303,6 +350,18 @@ public class CustomerLedgerActivity extends Activity {
         meta.setGravity(Gravity.RIGHT);
         meta.setPadding(0, dp(7), 0, 0);
         card.addView(meta);
+
+        if (orderId > 0) {
+            TextView openOrder = text("مشاهده سفارش مرتبط", 10, turquoise, true);
+            openOrder.setGravity(Gravity.RIGHT);
+            openOrder.setPadding(0, dp(8), 0, 0);
+            card.addView(openOrder);
+            card.setOnClickListener(v -> {
+                Intent intent = new Intent(this, OrderActivity.class);
+                intent.putExtra("order_id", orderId);
+                startActivity(intent);
+            });
+        }
 
         return card;
     }
@@ -369,6 +428,102 @@ public class CustomerLedgerActivity extends Activity {
                 }).start())
                 .setNegativeButton("لغو", null)
                 .show();
+    }
+
+    private void showAdjustmentDialog() {
+        LinearLayout box = dialogBox();
+
+        Spinner direction = new Spinner(this);
+        direction.setAdapter(new ArrayAdapter<>(
+                this,
+                android.R.layout.simple_spinner_dropdown_item,
+                new String[]{"افزایش بدهی", "کاهش بدهی"}
+        ));
+
+        EditText amount = numberField("مبلغ اصلاح (تومان)", "0");
+        EditText note = field("علت اصلاح حساب • الزامی", false);
+
+        box.addView(direction, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)
+        ));
+        box.addView(amount);
+        box.addView(note);
+
+        new AlertDialog.Builder(this)
+                .setTitle("اصلاح دستی حساب")
+                .setMessage("این عملیات فروش یا دریافت وجه نیست و فقط برای اصلاح مانده دفتر استفاده می‌شود.")
+                .setView(box)
+                .setPositiveButton("ثبت اصلاح", (d,w) -> new Thread(() -> {
+                    try {
+                        JSONObject body = new JSONObject();
+                        body.put(
+                                "direction",
+                                direction.getSelectedItemPosition() == 0 ? "debt" : "credit"
+                        );
+                        body.put("amount", parseLong(amount.getText().toString()));
+                        body.put("note", note.getText().toString().trim());
+
+                        ApiClient.post(
+                                this,
+                                "/api/customers/" + customerId + "/adjustment",
+                                body
+                        );
+
+                        runOnUiThread(() -> {
+                            Toast.makeText(this, "اصلاح حساب ثبت شد.", Toast.LENGTH_LONG).show();
+                            reload();
+                        });
+                    } catch (Exception e) {
+                        runOnUiThread(() -> showError(e.getMessage()));
+                    }
+                }).start())
+                .setNegativeButton("لغو", null)
+                .show();
+    }
+
+    private void shareStatement() {
+        if (customer == null) return;
+
+        StringBuilder body = new StringBuilder();
+        body.append("صورت‌حساب مشتری: ")
+                .append(customer.optString("name", "مشتری"))
+                .append("\nمانده فعلی: ")
+                .append(money(customer.optLong("balance", 0L)));
+
+        String phone = customer.optString("phone", "");
+        if (!phone.isEmpty()) body.append("\nشماره تماس: ").append(phone);
+
+        long overdue = customer.optLong("overdue_amount", 0L);
+        if (overdue > 0) {
+            body.append("\nبدهی معوق: ").append(money(overdue));
+        }
+
+        body.append("\n\nگردش‌های اخیر:");
+        int count = Math.min(entries == null ? 0 : entries.length(), 50);
+        for (int i = 0; i < count; i++) {
+            JSONObject entry = entries.optJSONObject(i);
+            if (entry == null) continue;
+
+            String type = entry.optString("entry_type", "");
+            String label = "debt".equals(type)
+                    ? "نسیه"
+                    : "payment".equals(type) ? "پرداخت" : "اصلاح";
+            body.append("\n")
+                    .append(label)
+                    .append(" • ")
+                    .append(money(Math.abs(entry.optLong("amount", 0L))));
+
+            String created = entry.optString("created_at", "");
+            if (!created.isEmpty()) {
+                body.append(" • ").append(JalaliDateTime.formatUtcCompact(created));
+            }
+        }
+
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_SUBJECT, "صورت‌حساب " + customer.optString("name", "مشتری"));
+        intent.putExtra(Intent.EXTRA_TEXT, body.toString());
+        startActivity(Intent.createChooser(intent, "اشتراک صورت‌حساب"));
     }
 
     private void showEditDialog() {
