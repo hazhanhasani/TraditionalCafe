@@ -469,17 +469,19 @@ public class MainActivity extends Activity {
     }
 
     private void showAppMenu() {
-        final boolean staff = isStaff();
-        String[] options = staff
-                ? new String[]{"بررسی بروزرسانی", "خروج از حساب"}
-                : new String[]{"بررسی بروزرسانی", "عیب‌یابی کامل /debug", "خروج از حساب"};
+        String role = getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff");
+        final boolean admin = "admin".equals(role);
+
+        String[] options = admin
+                ? new String[]{"بررسی بروزرسانی", "عیب‌یابی کامل /debug", "خروج از حساب"}
+                : new String[]{"بررسی بروزرسانی", "خروج از حساب"};
 
         new AlertDialog.Builder(this)
                 .setTitle("تنظیمات")
                 .setItems(options, (dialog, which) -> {
                     if (which == 0) {
                         checkForUpdates(true);
-                    } else if (!staff && which == 1) {
+                    } else if (admin && which == 1) {
                         startActivity(new Intent(this, DebugActivity.class));
                     } else {
                         getSharedPreferences("session", MODE_PRIVATE)
