@@ -1,0 +1,85 @@
+name: Encrypted D1 Backup
+
+on:
+  schedule:
+    # 20:50 UTC = 00:20 Iran (UTC+03:30)
+    - cron: "50 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      BACKUP_PASSWORD: ${{ secrets.CAFE_BACKUP_PASSWORD || secrets.CAFE_SETUP_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate backup credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_API_TOKEN:-}" || (echo "CLOUDFLARE_API_TOKEN is missing" && exit 1)
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || (echo "CLOUDFLARE_ACCOUNT_ID is missing" && exit 1)
+          test -n "${BACKUP_PASSWORD:-}" || (echo "CAFE_BACKUP_PASSWORD or CAFE_SETUP_KEY is missing" && exit 1)
+
+      - name: Export remote D1 database
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/d1-backup"
+          npx --yes wrangler@latest d1 export DB \
+            --remote \
+            --skip-confirmation \
+            --output "$RUNNER_TEMP/d1-backup/traditionalcafe-d1.sql"
+
+      - name: Encrypt and checksum backup
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/d1-backup"
+
+          STAMP="$(date -u +'%Y%m%dT%H%M%SZ')"
+          echo "stamp=$STAMP" >> "$GITHUB_OUTPUT"
+
+          sha256sum traditionalcafe-d1.sql > traditionalcafe-d1.sql.sha256
+
+          openssl enc -aes-256-cbc \
+            -salt \
+            -pbkdf2 \
+            -iter 200000 \
+            -md sha256 \
+            -pass env:BACKUP_PASSWORD \
+            -in traditionalcafe-d1.sql \
+            -out "traditionalcafe-d1-$STAMP.sql.enc"
+
+          cat > "traditionalcafe-d1-$STAMP.meta.txt" <<EOF
+          format=TraditionalCafe-D1-SQL-v1
+          created_utc=$STAMP
+          cipher=AES-256-CBC
+          kdf=PBKDF2-SHA256
+          iterations=200000
+          source=traditionalcafe-db
+          plaintext_sha256=$(cut -d' ' -f1 traditionalcafe-d1.sql.sha256)
+          EOF
+
+          rm -f traditionalcafe-d1.sql traditionalcafe-d1.sql.sha256
+
+      - name: Upload encrypted offsite backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: traditionalcafe-d1-backup-${{ steps.meta.outputs.stamp }}
+          path: |
+            ${{ runner.temp }}/d1-backup/*.sql.enc
+            ${{ runner.temp }}/d1-backup/*.meta.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
