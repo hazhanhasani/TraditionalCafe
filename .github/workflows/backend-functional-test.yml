@@ -1,0 +1,158 @@
+name: Backend Functional Test
+
+on:
+  workflow_run:
+    workflows:
+      - "Deploy Cloudflare Worker"
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  functional:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_BASE: https://traditionalcafe.hazhanhasani4268-0f9.workers.dev
+      CAFE_SETUP_KEY: ${{ secrets.CAFE_SETUP_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: End-to-end business flow
+        id: flow
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SUFFIX="${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}"
+          USERNAME="ci${SUFFIX}"
+          PASSWORD="CiTest-${SUFFIX}!"
+          TABLE_NAME="CI-${SUFFIX}"
+          SERVICE_NAME="CI-Service-${SUFFIX}"
+          CUSTOMER_NAME="CI-Customer-${SUFFIX}"
+          EXPENSE_DESC="CI-Expense-${SUFFIX}"
+
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+
+          curl --fail --silent --show-error "$API_BASE/api/time" | tee time.json
+          grep -q '"timezone":"Asia/Tehran"' time.json
+          grep -q '"jalali"' time.json
+
+          curl --fail --silent --show-error \
+            -X POST "$API_BASE/api/setup/user" \
+            -H 'Content-Type: application/json' \
+            -H "X-Setup-Key: $CAFE_SETUP_KEY" \
+            --data "{"username":"$USERNAME","name":"CI Admin","password":"$PASSWORD","role":"admin"}" \
+            | tee setup.json
+
+          TOKEN="$(jq -r '.token' setup.json)"
+          test -n "$TOKEN"
+          test "$TOKEN" != "null"
+
+          curl --fail --silent --show-error "$API_BASE/api/me" \
+            -H "Authorization: Bearer $TOKEN" | grep -q '"role":"admin"'
+
+          curl --fail --silent --show-error \
+            -X POST "$API_BASE/api/tables" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "{"name":"$TABLE_NAME"}" | tee table.json
+          TABLE_ID="$(jq -r '.id' table.json)"
+
+          curl --fail --silent --show-error \
+            -X POST "$API_BASE/api/catalog" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "{"type":"service","name":"$SERVICE_NAME","price":10000,"cost":3000}" \
+            | tee service.json
+
+          curl --fail --silent --show-error \
+            -X POST "$API_BASE/api/customers" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "{"name":"$CUSTOMER_NAME","phone":"000"}" | tee customer.json
+
+          curl --fail --silent --show-error \
+            -X POST "$API_BASE/api/tables/$TABLE_ID/open" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{}' | tee order.json
+          ORDER_ID="$(jq -r '.order_id' order.json)"
+
+          curl --fail --silent --show-error \
+            -X POST "$API_BASE/api/orders/$ORDER_ID/items" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "{"item_type":"service","name":"$SERVICE_NAME","qty":2,"unit_price":10000,"unit_cost":3000}" \
+            | tee item.json
+          grep -q '"total":20000' item.json
+
+          curl --fail --silent --show-error \
+            -X POST "$API_BASE/api/orders/$ORDER_ID/settle" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"discount":0,"payments":[{"method":"cash","amount":20000}]}' \
+            | grep -q '"ok":true'
+
+          curl --fail --silent --show-error \
+            -X POST "$API_BASE/api/expenses" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "{"category":"CI","amount":1000,"description":"$EXPENSE_DESC"}" \
+            | grep -q '"ok":true'
+
+          curl --fail --silent --show-error "$API_BASE/api/dashboard" \
+            -H "Authorization: Bearer $TOKEN" | grep -q '"ok":true"'
+
+          curl --fail --silent --show-error "$API_BASE/api/reports/summary" \
+            -H "Authorization: Bearer $TOKEN" | grep -q '"ok":true"'
+
+          curl --fail --silent --show-error "$API_BASE/api/debug" \
+            -H "Authorization: Bearer $TOKEN" | grep -q '"database":"ready"'
+
+          echo "Functional backend test passed."
+
+      - name: Cleanup functional-test data
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SUFFIX="${{ steps.flow.outputs.suffix }}"
+          if [ -z "${SUFFIX:-}" ]; then
+            exit 0
+          fi
+
+          USERNAME="ci${SUFFIX}"
+          TABLE_NAME="CI-${SUFFIX}"
+          SERVICE_NAME="CI-Service-${SUFFIX}"
+          CUSTOMER_NAME="CI-Customer-${SUFFIX}"
+          EXPENSE_DESC="CI-Expense-${SUFFIX}"
+
+          SQL="
+          DELETE FROM payments WHERE order_id IN (
+            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id WHERE t.name='$TABLE_NAME'
+          );
+          DELETE FROM order_items WHERE order_id IN (
+            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id WHERE t.name='$TABLE_NAME'
+          );
+          DELETE FROM orders WHERE table_id IN (SELECT id FROM cafe_tables WHERE name='$TABLE_NAME');
+          DELETE FROM customer_ledger WHERE customer_id IN (SELECT id FROM customers WHERE name='$CUSTOMER_NAME');
+          DELETE FROM expenses WHERE description='$EXPENSE_DESC';
+          DELETE FROM customers WHERE name='$CUSTOMER_NAME';
+          DELETE FROM service_catalog WHERE name='$SERVICE_NAME';
+          DELETE FROM cafe_tables WHERE name='$TABLE_NAME';
+          DELETE FROM audit_logs WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
+          DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
+          DELETE FROM users WHERE username='$USERNAME';
+          "
+
+          npx --yes wrangler@latest d1 execute DB --remote --command "$SQL"
