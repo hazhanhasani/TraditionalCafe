@@ -20,7 +20,8 @@ const ROLE_PERMISSION_KEYS = [
   "apply_discount",
   "view_all_shifts",
   "manage_inventory",
-  "manage_customer_limits"
+  "manage_customer_limits",
+  "adjust_customer_ledger"
 ];
 
 function json(body, status = 200) {
@@ -2940,7 +2941,7 @@ async function route(request, env) {
     if (!customer) return error("not_found", "مشتری پیدا نشد.", 404);
 
     const allEntries = await env.DB.prepare(
-      `SELECT customer_id,amount,entry_type,created_at,due_at
+      `SELECT id,customer_id,amount,entry_type,created_at,due_at
        FROM customer_ledger
        WHERE customer_id=?
        ORDER BY id`
@@ -2969,7 +2970,33 @@ async function route(request, env) {
       ? await env.DB.prepare(entrySql).bind(customerId, beforeId).all()
       : await env.DB.prepare(entrySql).bind(customerId).all();
 
-    const rows = entries.results || [];
+    let runningBalance = 0;
+    let debtEntriesTotal = 0;
+    let paymentsTotal = 0;
+    let positiveAdjustments = 0;
+    let negativeAdjustments = 0;
+    const runningById = new Map();
+
+    for (const entry of allEntries.results || []) {
+      const amount = Number(entry.amount || 0);
+      runningBalance += amount;
+      runningById.set(Number(entry.id), runningBalance);
+
+      if (entry.entry_type === "debt" && amount > 0) {
+        debtEntriesTotal += amount;
+      } else if (entry.entry_type === "payment" && amount < 0) {
+        paymentsTotal += Math.abs(amount);
+      } else if (entry.entry_type === "adjustment") {
+        if (amount > 0) positiveAdjustments += amount;
+        if (amount < 0) negativeAdjustments += Math.abs(amount);
+      }
+    }
+
+    const rows = (entries.results || []).map((row) => ({
+      ...row,
+      running_balance: runningById.get(Number(row.id)) ?? null,
+    }));
+
     const nextBeforeId = rows.length === limit
       ? Number(rows[rows.length - 1].id)
       : null;
@@ -2995,6 +3022,14 @@ async function route(request, env) {
         days_overdue: Number(account.days_overdue || 0),
       },
       entries: rows,
+      statement: {
+        debt_entries_total: debtEntriesTotal,
+        payments_total: paymentsTotal,
+        positive_adjustments: positiveAdjustments,
+        negative_adjustments: negativeAdjustments,
+        transaction_count: (allEntries.results || []).length,
+        current_balance: balance,
+      },
       next_before_id: nextBeforeId,
     });
   }
@@ -3075,6 +3110,105 @@ async function route(request, env) {
       balance_before: currentBalance,
       balance_after: balanceAfter,
     });
+  }
+
+  const customerAdjustment = path.match(/^\/api\/customers\/(\d+)\/adjustment$/);
+  if (customerAdjustment && method === "POST") {
+    if (!(await hasPermission(env, user, "adjust_customer_ledger"))) {
+      return error("forbidden", "مجوز اصلاح دستی حساب مشتری فعال نیست.", 403);
+    }
+
+    const customerId = Number(customerAdjustment[1]);
+    const customer = await env.DB.prepare(
+      `SELECT c.id,c.name,c.active,c.credit_limit,c.due_days,
+              COALESCE(SUM(l.amount),0) AS balance
+       FROM customers c
+       LEFT JOIN customer_ledger l ON l.customer_id=c.id
+       WHERE c.id=?
+       GROUP BY c.id`
+    ).bind(customerId).first();
+
+    if (!customer) return error("not_found", "مشتری پیدا نشد.", 404);
+
+    const data = await bodyJson(request);
+    const direction = String(data.direction || "");
+    const amount = intAmount(data.amount);
+    const note = String(data.note || "").trim().slice(0, 300);
+
+    if (!["debt","credit"].includes(direction) || !amount || amount <= 0) {
+      return error("invalid_adjustment", "نوع و مبلغ اصلاح حساب معتبر نیست.");
+    }
+    if (note.length < 3) {
+      return error("adjustment_note_required", "برای اصلاح دستی حساب، توضیح الزامی است.");
+    }
+
+    const currentBalance = Number(customer.balance || 0);
+    const signedAmount = direction === "debt" ? amount : -amount;
+    const balanceAfter = currentBalance + signedAmount;
+
+    if (direction === "credit" && amount > Math.max(0, currentBalance)) {
+      return error(
+        "adjustment_exceeds_balance",
+        "کاهش دستی نمی‌تواند بیشتر از بدهی فعلی باشد.",
+        409,
+        { balance: currentBalance, requested: amount }
+      );
+    }
+
+    const creditLimit = Number(customer.credit_limit || 0);
+    if (direction === "debt" && creditLimit > 0 && balanceAfter > creditLimit) {
+      return error(
+        "credit_limit_exceeded",
+        "اصلاح افزایشی از سقف اعتبار مشتری عبور می‌کند.",
+        409,
+        {
+          balance: currentBalance,
+          credit_limit: creditLimit,
+          requested: amount,
+          balance_after: balanceAfter,
+        }
+      );
+    }
+
+    const dueDays = Number(customer.due_days || 0);
+    const dueAt = direction === "debt" && dueDays > 0
+      ? new Date(Date.now() + dueDays * 86400000).toISOString()
+      : null;
+
+    const result = await env.DB.prepare(
+      `INSERT INTO customer_ledger
+       (customer_id,entry_type,amount,note,created_by,due_at)
+       VALUES (?,?,?,?,?,?)`
+    ).bind(
+      customerId,
+      "adjustment",
+      signedAmount,
+      note,
+      user.id,
+      dueAt
+    ).run();
+
+    const id = Number(result.meta.last_row_id);
+    await audit(env, user.id, "customer_ledger_adjustment", "customer", customerId, {
+      ledger_entry_id: id,
+      direction,
+      amount,
+      signed_amount: signedAmount,
+      balance_before: currentBalance,
+      balance_after: balanceAfter,
+      note,
+    });
+
+    return json({
+      ok: true,
+      id,
+      customer_id: customerId,
+      direction,
+      amount,
+      balance_before: currentBalance,
+      balance_after: balanceAfter,
+      due_at: dueAt,
+    }, 201);
   }
 
   if (path === "/api/expenses" && method === "GET") {
