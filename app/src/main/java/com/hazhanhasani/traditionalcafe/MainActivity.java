@@ -69,6 +69,24 @@ public class MainActivity extends Activity {
     private TextView debtMetricView;
     private TextView expenseMetricView;
     private TextView profitMetricView;
+    private TextView jalaliClockView;
+    private TextView cashTodayView;
+    private TextView cardTodayView;
+    private TextView creditTodayView;
+    private TextView tablesSummaryTitleView;
+    private TextView tablesSummarySubtitleView;
+    private TextView tablesSummaryStatusView;
+    private LinearLayout dashboardTableChips;
+
+    private final Runnable clockRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (jalaliClockView != null) {
+                jalaliClockView.setText(JalaliDateTime.nowFull());
+            }
+            updateHandler.postDelayed(this, 60000L);
+        }
+    };
 
     private final Runnable periodicUpdateCheck = new Runnable() {
         @Override
@@ -103,6 +121,8 @@ public class MainActivity extends Activity {
         window.getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         setContentView(buildScreen());
         startPeriodicUpdateChecks();
+        updateHandler.removeCallbacks(clockRunnable);
+        clockRunnable.run();
         refreshDashboard();
     }
 
@@ -121,6 +141,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         updateHandler.removeCallbacks(periodicUpdateCheck);
+        updateHandler.removeCallbacks(clockRunnable);
         if (downloadReceiverRegistered) {
             try {
                 unregisterReceiver(downloadReceiver);
@@ -417,6 +438,11 @@ public class MainActivity extends Activity {
         subtitle.setPadding(0, dp(3), 0, 0);
         titles.addView(subtitle);
 
+        jalaliClockView = label(JalaliDateTime.nowFull(), 11, muted, false);
+        jalaliClockView.setGravity(Gravity.RIGHT);
+        jalaliClockView.setPadding(0, dp(5), 0, 0);
+        titles.addView(jalaliClockView);
+
         TextView settings = label("⋮", 30, ink, false);
         settings.setGravity(Gravity.CENTER);
         settings.setOnClickListener(v -> checkForUpdates(true));
@@ -494,6 +520,9 @@ public class MainActivity extends Activity {
         box.addView(t);
 
         TextView v = label(value, 16, Color.WHITE, true);
+        if ("نقدی".equals(title)) cashTodayView = v;
+        if ("کارت".equals(title)) cardTodayView = v;
+        if ("نسیه".equals(title)) creditTodayView = v;
         v.setGravity(Gravity.RIGHT);
         v.setPadding(0, dp(4), 0, 0);
         box.addView(v);
@@ -620,16 +649,19 @@ public class MainActivity extends Activity {
         right.setOrientation(LinearLayout.VERTICAL);
         header.addView(right, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView t = label("۱۲ میز آماده", 15, ink, true);
+        TextView t = label("در حال دریافت میزها…", 15, ink, true);
+        tablesSummaryTitleView = t;
         t.setGravity(Gravity.RIGHT);
         right.addView(t);
 
-        TextView s = label("فعلاً هیچ میز بازی وجود ندارد", 11, muted, false);
+        TextView s = label("وضعیت لحظه‌ای میزها", 11, muted, false);
+        tablesSummarySubtitleView = s;
         s.setGravity(Gravity.RIGHT);
         s.setPadding(0, dp(3), 0, 0);
         right.addView(s);
 
-        TextView status = label("همه آزاد", 11, green, true);
+        TextView status = label("در حال بررسی", 11, green, true);
+        tablesSummaryStatusView = status;
         status.setGravity(Gravity.CENTER);
         status.setPadding(dp(10), dp(6), dp(10), dp(6));
         status.setBackground(rounded(Color.rgb(232, 243, 235), 16));
@@ -637,20 +669,10 @@ public class MainActivity extends Activity {
         card.addView(header);
 
         LinearLayout chips = new LinearLayout(this);
+        dashboardTableChips = chips;
         chips.setOrientation(LinearLayout.HORIZONTAL);
         chips.setGravity(Gravity.CENTER);
         chips.setPadding(0, dp(16), 0, 0);
-
-        for (int i = 1; i <= 6; i++) {
-            TextView chip = label(String.valueOf(i), 13, muted, true);
-            chip.setGravity(Gravity.CENTER);
-            GradientDrawable bgChip = rounded(bg, 14);
-            bgChip.setStroke(dp(1), divider);
-            chip.setBackground(bgChip);
-            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, dp(42), 1f);
-            cp.setMargins(dp(3), 0, dp(3), 0);
-            chips.addView(chip, cp);
-        }
         card.addView(chips);
 
         TextView open = label("+ باز کردن میز جدید", 13, turquoise, true);
@@ -728,26 +750,118 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 JSONObject data = ApiClient.get(this, "/api/dashboard");
+                JSONObject tablesData = ApiClient.get(this, "/api/tables");
+
                 long sales = data.optLong("sales_today", 0L);
                 long hookahs = data.optLong("hookahs_today", 0L);
                 long debt = data.optLong("total_customer_debt", 0L);
                 long expenses = data.optLong("expenses_today", 0L);
                 long profit = data.optLong("net_profit_today", 0L);
 
+                long cash = 0L;
+                long card = 0L;
+                long credit = 0L;
+                JSONArray methods = data.optJSONArray("payment_methods");
+                if (methods != null) {
+                    for (int i = 0; i < methods.length(); i++) {
+                        JSONObject method = methods.optJSONObject(i);
+                        if (method == null) continue;
+                        String name = method.optString("method", "");
+                        long amount = method.optLong("amount", 0L);
+                        if ("cash".equals(name)) cash += amount;
+                        else if ("card".equals(name) || "transfer".equals(name)) card += amount;
+                        else if ("credit".equals(name)) credit += amount;
+                    }
+                }
+
+                final long finalCash = cash;
+                final long finalCard = card;
+                final long finalCredit = credit;
+                JSONArray tables = tablesData.optJSONArray("tables");
+
                 runOnUiThread(() -> {
                     if (salesAmountView != null) salesAmountView.setText(formatMoney(sales));
-                    if (hookahMetricView != null) hookahMetricView.setText(String.valueOf(hookahs));
+                    if (hookahMetricView != null) hookahMetricView.setText(JalaliDateTime.fa(String.valueOf(hookahs)));
                     if (debtMetricView != null) debtMetricView.setText(formatMoney(debt));
                     if (expenseMetricView != null) expenseMetricView.setText(formatMoney(expenses));
                     if (profitMetricView != null) profitMetricView.setText(formatMoney(profit));
+                    if (cashTodayView != null) cashTodayView.setText(formatCompactMoney(finalCash));
+                    if (cardTodayView != null) cardTodayView.setText(formatCompactMoney(finalCard));
+                    if (creditTodayView != null) creditTodayView.setText(formatCompactMoney(finalCredit));
+                    renderDashboardTables(tables);
                 });
             } catch (Exception ignored) {
             }
         }).start();
     }
 
+    private void renderDashboardTables(JSONArray tables) {
+        if (dashboardTableChips == null) return;
+        dashboardTableChips.removeAllViews();
+
+        int total = tables == null ? 0 : tables.length();
+        int busy = 0;
+        if (tables != null) {
+            for (int i = 0; i < tables.length(); i++) {
+                JSONObject table = tables.optJSONObject(i);
+                if (table != null && table.optLong("order_id", 0L) > 0) busy++;
+            }
+        }
+
+        if (tablesSummaryTitleView != null) {
+            tablesSummaryTitleView.setText(JalaliDateTime.fa(String.valueOf(total)) + " میز فعال");
+        }
+        if (tablesSummarySubtitleView != null) {
+            tablesSummarySubtitleView.setText(
+                    busy == 0 ? "هیچ سفارش بازی وجود ندارد" :
+                            JalaliDateTime.fa(String.valueOf(busy)) + " میز دارای سفارش باز"
+            );
+        }
+        if (tablesSummaryStatusView != null) {
+            tablesSummaryStatusView.setText(
+                    busy == 0 ? "همه آزاد" : JalaliDateTime.fa(String.valueOf(busy)) + " مشغول"
+            );
+            tablesSummaryStatusView.setTextColor(busy == 0 ? green : brown);
+            tablesSummaryStatusView.setBackground(rounded(
+                    busy == 0 ? Color.rgb(232, 243, 235) : softGold, 16
+            ));
+        }
+
+        if (tables == null || tables.length() == 0) return;
+
+        int shown = Math.min(6, tables.length());
+        for (int i = 0; i < shown; i++) {
+            JSONObject table = tables.optJSONObject(i);
+            if (table == null) continue;
+
+            boolean isBusy = table.optLong("order_id", 0L) > 0;
+            String name = table.optString("name", String.valueOf(i + 1));
+            String shortName = name.replace("میز", "").trim();
+            if (shortName.isEmpty()) shortName = String.valueOf(i + 1);
+
+            TextView chip = label(JalaliDateTime.fa(shortName), 12, isBusy ? brown : green, true);
+            chip.setGravity(Gravity.CENTER);
+
+            GradientDrawable chipBg = rounded(
+                    isBusy ? softGold : Color.rgb(232, 243, 235), 14
+            );
+            chipBg.setStroke(dp(1), isBusy ? gold : Color.rgb(196, 225, 222));
+            chip.setBackground(chipBg);
+            chip.setOnClickListener(v -> openModule("tables"));
+
+            LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, dp(42), 1f);
+            cp.setMargins(dp(3), 0, dp(3), 0);
+            dashboardTableChips.addView(chip, cp);
+        }
+    }
+
+    private String formatCompactMoney(long amount) {
+        if (amount == 0) return "۰";
+        return JalaliDateTime.fa(String.format(java.util.Locale.US, "%,d", amount));
+    }
+
     private String formatMoney(long amount) {
-        return String.format(java.util.Locale.US, "%,d تومان", amount);
+        return JalaliDateTime.fa(String.format(java.util.Locale.US, "%,d تومان", amount));
     }
 
     private View buildBottomNav() {
