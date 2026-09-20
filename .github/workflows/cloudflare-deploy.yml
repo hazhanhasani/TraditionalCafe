@@ -36,6 +36,23 @@ jobs:
             echo "Cloudflare secrets are not configured yet; deploy will be skipped."
           fi
 
+      - name: Apply D1 migrations
+        if: steps.auth.outputs.ready == 'true'
+        run: npx wrangler@latest d1 migrations apply DB --remote
+
+      - name: Sync setup key
+        if: steps.auth.outputs.ready == 'true'
+        env:
+          CAFE_SETUP_KEY: ${{ secrets.CAFE_SETUP_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${CAFE_SETUP_KEY:-}" ]; then
+            printf '%s' "$CAFE_SETUP_KEY" | npx wrangler@latest secret put SETUP_KEY
+          else
+            echo "CAFE_SETUP_KEY is not configured yet; initial admin bootstrap will remain locked."
+          fi
+
       - name: Deploy Worker
         if: steps.auth.outputs.ready == 'true'
         uses: cloudflare/wrangler-action@v4
