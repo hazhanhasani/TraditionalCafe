@@ -359,6 +359,12 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean isStaff() {
+        return "staff".equals(
+                getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff")
+        );
+    }
+
     private View buildScreen() {
         LinearLayout shell = new LinearLayout(this);
         shell.setOrientation(LinearLayout.VERTICAL);
@@ -386,17 +392,25 @@ public class MainActivity extends Activity {
         content.addView(buildTopBar());
         content.addView(buildHeroCard());
 
-        content.addView(sectionHeader("نمای کلی امروز", "لحظه‌ای"));
+        content.addView(sectionHeader(
+                isStaff() ? "فروش و نسیه امروز من" : "نمای کلی امروز",
+                "لحظه‌ای"
+        ));
         content.addView(buildMetrics());
 
-        content.addView(sectionHeader("دسترسی سریع", "همه ابزارها"));
+        content.addView(sectionHeader(
+                "دسترسی سریع",
+                isStaff() ? "ابزارهای فروش من" : "همه ابزارها"
+        ));
         content.addView(buildQuickActions());
 
         content.addView(sectionHeader("وضعیت میزها", "مدیریت میزها"));
         content.addView(buildTablesCard());
 
-        content.addView(sectionHeader("فعالیت اخیر", "مشاهده همه"));
-        content.addView(buildEmptyActivity());
+        if (!isStaff()) {
+            content.addView(sectionHeader("فعالیت اخیر", "مشاهده همه"));
+            content.addView(buildEmptyActivity());
+        }
 
         shell.addView(buildBottomNav());
         return shell;
@@ -455,20 +469,19 @@ public class MainActivity extends Activity {
     }
 
     private void showAppMenu() {
-        String[] options = new String[]{
-                "بررسی بروزرسانی",
-                "عیب‌یابی کامل /debug",
-                "خروج از حساب"
-        };
+        final boolean staff = isStaff();
+        String[] options = staff
+                ? new String[]{"بررسی بروزرسانی", "خروج از حساب"}
+                : new String[]{"بررسی بروزرسانی", "عیب‌یابی کامل /debug", "خروج از حساب"};
 
         new AlertDialog.Builder(this)
                 .setTitle("تنظیمات")
                 .setItems(options, (dialog, which) -> {
                     if (which == 0) {
                         checkForUpdates(true);
-                    } else if (which == 1) {
+                    } else if (!staff && which == 1) {
                         startActivity(new Intent(this, DebugActivity.class));
-                    } else if (which == 2) {
+                    } else {
                         getSharedPreferences("session", MODE_PRIVATE)
                                 .edit()
                                 .clear()
@@ -504,7 +517,10 @@ public class MainActivity extends Activity {
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
 
-        TextView today = label("فروش امروز", 14, Color.argb(210, 255, 255, 255), false);
+        TextView today = label(
+                isStaff() ? "فروش امروز من" : "فروش امروز",
+                14, Color.argb(210, 255, 255, 255), false
+        );
         top.addView(today, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView badge = label("روز کاری", 11, brown, true);
@@ -564,10 +580,21 @@ public class MainActivity extends Activity {
         grid.setAlignmentMode(GridLayout.ALIGN_MARGINS);
         grid.setUseDefaultMargins(false);
 
-        grid.addView(metricCard("قلیان امروز", "۰", "ثبت نشده", R.drawable.ic_hookah, softTeal, turquoise));
-        grid.addView(metricCard("طلب دفتری", "۰ تومان", "بدون بدهی", R.drawable.ic_book, softGold, brown));
-        grid.addView(metricCard("هزینه امروز", "۰ تومان", "هزینه‌ای ثبت نشده", R.drawable.ic_expense, Color.rgb(250, 235, 232), Color.rgb(170, 76, 62)));
-        grid.addView(metricCard("سود امروز", "۰ تومان", "پس از ثبت فروش", R.drawable.ic_chart, Color.rgb(232, 243, 235), green));
+        if (isStaff()) {
+            grid.addView(metricCard(
+                    "قلیان امروز من", "۰", "فقط فروش‌های ثبت‌شده توسط شما",
+                    R.drawable.ic_hookah, softTeal, turquoise
+            ));
+            grid.addView(metricCard(
+                    "نسیه امروز من", "۰ تومان", "نسیه فروش‌های امروز شما",
+                    R.drawable.ic_book, softGold, brown
+            ));
+        } else {
+            grid.addView(metricCard("قلیان امروز", "۰", "ثبت نشده", R.drawable.ic_hookah, softTeal, turquoise));
+            grid.addView(metricCard("طلب دفتری", "۰ تومان", "بدون بدهی", R.drawable.ic_book, softGold, brown));
+            grid.addView(metricCard("هزینه امروز", "۰ تومان", "هزینه‌ای ثبت نشده", R.drawable.ic_expense, Color.rgb(250, 235, 232), Color.rgb(170, 76, 62)));
+            grid.addView(metricCard("سود امروز", "۰ تومان", "پس از ثبت فروش", R.drawable.ic_chart, Color.rgb(232, 243, 235), green));
+        }
 
         return grid;
     }
@@ -595,8 +622,8 @@ public class MainActivity extends Activity {
         card.addView(title);
 
         TextView value = label(valueText, 18, ink, true);
-        if ("قلیان امروز".equals(titleText)) hookahMetricView = value;
-        if ("طلب دفتری".equals(titleText)) debtMetricView = value;
+        if ("قلیان امروز".equals(titleText) || "قلیان امروز من".equals(titleText)) hookahMetricView = value;
+        if ("طلب دفتری".equals(titleText) || "نسیه امروز من".equals(titleText)) debtMetricView = value;
         if ("هزینه امروز".equals(titleText)) expenseMetricView = value;
         if ("سود امروز".equals(titleText)) profitMetricView = value;
         value.setGravity(Gravity.RIGHT);
@@ -617,12 +644,18 @@ public class MainActivity extends Activity {
         grid.setAlignmentMode(GridLayout.ALIGN_MARGINS);
 
         grid.addView(actionTile("میزها", "سفارش و وضعیت میز", R.drawable.ic_table, turquoise, softTeal));
-        grid.addView(actionTile("ثبت قلیان", "ثبت سریع سفارش", R.drawable.ic_hookah, brown, softGold));
-        grid.addView(actionTile("تعریف قلیان و خدمات", "نام، قیمت فروش و هزینه", R.drawable.ic_hookah, turquoise, softTeal));
-        grid.addView(actionTile("حساب دفتری", "بدهی و پرداخت مشتری", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
-        grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
-        grid.addView(actionTile("تسویه", "نقد، کارت و ترکیبی", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
-        grid.addView(actionTile("گزارش‌ها", "سود و زیان و عملکرد", R.drawable.ic_chart, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
+        grid.addView(actionTile("ثبت قلیان", "ثبت سریع فروش خودم", R.drawable.ic_hookah, brown, softGold));
+        grid.addView(actionTile("حساب دفتری", "نسیه و پرداخت مشتری", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
+
+        if (isStaff()) {
+            grid.addView(actionTile("فروش‌های امروز من", "فقط فروش‌های ثبت‌شده توسط من", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
+            grid.addView(actionTile("تسویه", "تسویه سفارش‌های خودم", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
+        } else {
+            grid.addView(actionTile("تعریف قلیان و خدمات", "نام، قیمت فروش و هزینه", R.drawable.ic_hookah, turquoise, softTeal));
+            grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
+            grid.addView(actionTile("تسویه", "نقد، کارت و ترکیبی", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
+            grid.addView(actionTile("گزارش‌ها", "سود و زیان و عملکرد", R.drawable.ic_chart, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
+        }
 
         return grid;
     }
@@ -753,6 +786,8 @@ public class MainActivity extends Activity {
             openModule("tables");
         } else if ("ثبت قلیان".equals(title)) {
             openModule("hookah");
+        } else if ("فروش‌های امروز من".equals(title)) {
+            openModule("my_sales");
         } else if ("تعریف قلیان و خدمات".equals(title)) {
             startActivity(new Intent(this, CatalogActivity.class));
         } else if ("حساب دفتری".equals(title)) {
@@ -785,7 +820,9 @@ public class MainActivity extends Activity {
 
                 long sales = data.optLong("sales_today", 0L);
                 long hookahs = data.optLong("hookahs_today", 0L);
-                long debt = data.optLong("total_customer_debt", 0L);
+                long debt = isStaff()
+                        ? data.optLong("credit_today", 0L)
+                        : data.optLong("total_customer_debt", 0L);
                 long expenses = data.optLong("expenses_today", 0L);
                 long profit = data.optLong("net_profit_today", 0L);
 
@@ -907,7 +944,12 @@ public class MainActivity extends Activity {
         nav.addView(navItem("خانه", R.drawable.ic_home, true), new LinearLayout.LayoutParams(0, dp(58), 1f));
         nav.addView(navItem("میزها", R.drawable.ic_table, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
         nav.addView(navItem("دفتر", R.drawable.ic_book, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
-        nav.addView(navItem("گزارش", R.drawable.ic_chart, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
+
+        if (isStaff()) {
+            nav.addView(navItem("فروش من", R.drawable.ic_wallet, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
+        } else {
+            nav.addView(navItem("گزارش", R.drawable.ic_chart, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
+        }
 
         return nav;
     }
@@ -932,6 +974,7 @@ public class MainActivity extends Activity {
             if ("خانه".equals(title)) return;
             if ("میزها".equals(title)) openModule("tables");
             else if ("دفتر".equals(title)) openModule("customers");
+            else if ("فروش من".equals(title)) openModule("my_sales");
             else if ("گزارش".equals(title)) openModule("reports");
         });
         return item;
