@@ -45,6 +45,7 @@ public class AuthActivity extends Activity {
     private EditText passwordInput;
     private Button primaryButton;
     private TextView modeButton;
+    private TextView serverStatusView;
     private boolean setupMode = false;
 
     private EditText displayNameInput;
@@ -101,8 +102,20 @@ public class AuthActivity extends Activity {
 
         TextView subtitle = text("ورود امن به سیستم مدیریت", 13, muted, false);
         subtitle.setGravity(Gravity.CENTER);
-        subtitle.setPadding(0, dp(6), 0, dp(22));
+        subtitle.setPadding(0, dp(6), 0, dp(12));
         root.addView(subtitle);
+
+        serverStatusView = text("در حال بررسی اتصال به سرور…", 11, muted, true);
+        serverStatusView.setGravity(Gravity.CENTER);
+        serverStatusView.setPadding(dp(10), dp(8), dp(10), dp(8));
+        serverStatusView.setBackground(rounded(Color.rgb(241, 238, 232), 14));
+        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        statusLp.gravity = Gravity.CENTER_HORIZONTAL;
+        statusLp.bottomMargin = dp(16);
+        root.addView(serverStatusView, statusLp);
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -125,6 +138,8 @@ public class AuthActivity extends Activity {
 
         displayNameInput = field("نام نمایشی", false);
         setupKeyInput = field("کلید راه‌اندازی CAFE_SETUP_KEY", true);
+        setupKeyInput.setTextDirection(View.TEXT_DIRECTION_LTR);
+        setupKeyInput.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         setupFields.addView(displayNameInput);
         setupFields.addView(setupKeyInput);
 
@@ -190,8 +205,17 @@ public class AuthActivity extends Activity {
         input.setBackground(rounded(Color.rgb(250, 248, 244), 16));
         if (password) {
             input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            input.setTextDirection(View.TEXT_DIRECTION_LTR);
+            input.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         } else {
             input.setInputType(InputType.TYPE_CLASS_TEXT);
+            if ("نام کاربری".equals(hint)) {
+                input.setTextDirection(View.TEXT_DIRECTION_LTR);
+                input.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+            } else {
+                input.setTextDirection(View.TEXT_DIRECTION_RTL);
+                input.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+            }
         }
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -261,19 +285,34 @@ public class AuthActivity extends Activity {
                 JSONObject response = new JSONObject(body.toString());
                 boolean configured = response.optBoolean("configured", false);
 
-                if (!configured) {
-                    runOnUiThread(() -> {
+                runOnUiThread(() -> {
+                    serverStatusView.setText(configured
+                            ? "سرور و دیتابیس آماده • سیستم راه‌اندازی شده"
+                            : "سرور و دیتابیس آماده • حساب اولیه ساخته نشده");
+                    serverStatusView.setTextColor(configured
+                            ? Color.rgb(62, 135, 95)
+                            : turquoise);
+                    serverStatusView.setBackground(rounded(
+                            configured ? Color.rgb(232, 243, 235) : softTeal,
+                            14
+                    ));
+
+                    if (!configured) {
                         if (!setupMode) toggleMode();
                         modeButton.setText("اولین حساب هنوز ساخته نشده است");
-                        Toast.makeText(
-                                this,
-                                "برای اولین ورود، یک‌بار حساب اولیه را با CAFE_SETUP_KEY بساز.",
-                                Toast.LENGTH_LONG
-                        ).show();
+                    }
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    serverStatusView.setText("ارتباط با سرور برقرار نشد • برای تلاش دوباره لمس کنید");
+                    serverStatusView.setTextColor(Color.rgb(177, 84, 68));
+                    serverStatusView.setBackground(rounded(Color.rgb(250, 235, 232), 14));
+                    serverStatusView.setOnClickListener(v -> {
+                        serverStatusView.setText("در حال بررسی اتصال به سرور…");
+                        serverStatusView.setTextColor(muted);
+                        detectSetupState();
                     });
-                }
-            } catch (Exception ignored) {
-                // Login still remains available when the status check cannot be completed.
+                });
             } finally {
                 if (connection != null) connection.disconnect();
             }
