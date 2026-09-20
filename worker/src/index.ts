@@ -46,17 +46,17 @@ async function sha256Hex(value) {
   return bytesToHex(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
 }
 
-async function hashPin(pin, saltHex) {
+async function hashPassword(password, saltHex) {
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(String(pin)),
+    encoder.encode(String(password)),
     "PBKDF2",
     false,
     ["deriveBits"],
   );
   const salt = new Uint8Array((saltHex.match(/.{1,2}/g) || []).map((x) => parseInt(x, 16)));
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt, iterations: 120000 },
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations: 180000 },
     key,
     256,
   );
@@ -74,7 +74,7 @@ async function auth(request, env) {
   if (!token) return null;
   const tokenHash = await sha256Hex(token);
   const row = await env.DB.prepare(
-    `SELECT u.id, u.name, u.role, u.active
+    `SELECT u.id, u.username, u.name, u.role, u.active
      FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP AND u.active = 1
@@ -140,45 +140,77 @@ async function route(request, env) {
   }
 
   if (path === "/api/setup/status" && method === "GET") {
-    const row = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
-    return json({ ok: true, configured: Number(row?.count || 0) > 0 });
+    const users = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
+    const admins = await env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE role='admin' AND active=1").first();
+    return json({
+      ok: true,
+      configured: Number(users?.count || 0) > 0,
+      user_count: Number(users?.count || 0),
+      admin_count: Number(admins?.count || 0),
+    });
   }
 
-  if (path === "/api/bootstrap" && method === "POST") {
+  if ((path === "/api/bootstrap" || path === "/api/setup/user") && method === "POST") {
     if (!env.SETUP_KEY) return error("setup_key_missing", "SETUP_KEY Worker secret is not configured.", 503);
     const supplied = request.headers.get("x-setup-key") || "";
-    if (supplied !== env.SETUP_KEY) return error("forbidden", "Invalid setup key.", 403);
-
-    const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM users").first();
-    if (Number(count?.count || 0) > 0) return error("already_configured", "Initial admin already exists.", 409);
+    if (supplied !== env.SETUP_KEY) return error("forbidden", "کلید راه‌اندازی معتبر نیست.", 403);
 
     const data = await bodyJson(request);
-    const name = String(data.name || "").trim();
-    const pin = String(data.pin || "").trim();
-    if (name.length < 2) return error("invalid_name", "Name is required.");
-    if (!/^\d{4,8}$/.test(pin)) return error("invalid_pin", "PIN must contain 4 to 8 digits.");
+    const username = String(data.username || "").trim().toLowerCase();
+    const name = String(data.name || username).trim();
+    const password = String(data.password || "");
+    const role = ["admin","cashier","staff"].includes(data.role) ? data.role : "staff";
+
+    if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+      return error("invalid_username", "نام کاربری باید ۳ تا ۳۲ کاراکتر و شامل حروف انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.");
+    }
+    if (name.length < 2 || name.length > 80) return error("invalid_name", "نام نمایشی معتبر نیست.");
+    if (password.length < 8 || password.length > 128) {
+      return error("invalid_password", "رمز عبور باید حداقل ۸ کاراکتر باشد.");
+    }
 
     const salt = randomHex(16);
-    const pinHash = await hashPin(pin, salt);
-    const result = await env.DB.prepare(
-      "INSERT INTO users (name, role, pin_hash, pin_salt) VALUES (?,?,?,?)",
-    ).bind(name, "admin", pinHash, salt).run();
+    const passwordHash = await hashPassword(password, salt);
+    try {
+      const result = await env.DB.prepare(
+        "INSERT INTO users (username,name,role,pin_hash,pin_salt) VALUES (?,?,?,?,?)",
+      ).bind(username, name, role, passwordHash, salt).run();
 
-    await audit(env, Number(result.meta.last_row_id), "bootstrap_admin", "user", Number(result.meta.last_row_id));
-    return json({ ok: true, user_id: result.meta.last_row_id, name, role: "admin" }, 201);
+      const userId = Number(result.meta.last_row_id);
+      const token = randomHex(32);
+      const tokenHash = await sha256Hex(token);
+      await env.DB.prepare(
+        "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, datetime('now','+30 days'))",
+      ).bind(userId, tokenHash).run();
+
+      await audit(env, userId, "setup_user", "user", userId, { username, name, role });
+      return json({
+        ok: true,
+        token,
+        user: { id: userId, username, name, role },
+        expires_in_days: 30,
+      }, 201);
+    } catch (e) {
+      return error("user_exists", "این نام کاربری قبلاً ثبت شده است.", 409);
+    }
   }
 
   if (path === "/api/auth/login" && method === "POST") {
     const data = await bodyJson(request);
-    const name = String(data.name || "").trim();
-    const pin = String(data.pin || "").trim();
+    const username = String(data.username || "").trim().toLowerCase();
+    const password = String(data.password || "");
     const user = await env.DB.prepare(
-      "SELECT id, name, role, pin_hash, pin_salt, active FROM users WHERE name = ? COLLATE NOCASE LIMIT 1",
-    ).bind(name).first();
-    if (!user || Number(user.active) !== 1) return error("invalid_credentials", "نام کاربری یا رمز اشتباه است.", 401);
+      "SELECT id, username, name, role, pin_hash, pin_salt, active FROM users WHERE username = ? COLLATE NOCASE LIMIT 1",
+    ).bind(username).first();
 
-    const candidate = await hashPin(pin, user.pin_salt);
-    if (candidate !== user.pin_hash) return error("invalid_credentials", "نام کاربری یا رمز اشتباه است.", 401);
+    if (!user || Number(user.active) !== 1) {
+      return error("invalid_credentials", "نام کاربری یا رمز عبور اشتباه است.", 401);
+    }
+
+    const candidate = await hashPassword(password, user.pin_salt);
+    if (candidate !== user.pin_hash) {
+      return error("invalid_credentials", "نام کاربری یا رمز عبور اشتباه است.", 401);
+    }
 
     const token = randomHex(32);
     const tokenHash = await sha256Hex(token);
@@ -190,7 +222,7 @@ async function route(request, env) {
     return json({
       ok: true,
       token,
-      user: { id: user.id, name: user.name, role: user.role },
+      user: { id: user.id, username: user.username, name: user.name, role: user.role },
       expires_in_days: 30,
     });
   }
@@ -211,7 +243,7 @@ async function route(request, env) {
   if (path === "/api/users" && method === "GET") {
     if (!requireRole(user, ["admin"])) return error("forbidden", "Admin access required.", 403);
     const result = await env.DB.prepare(
-      "SELECT id, name, role, active, created_at, updated_at FROM users ORDER BY id",
+      "SELECT id, username, name, role, active, created_at, updated_at FROM users ORDER BY id",
     ).all();
     return json({ ok: true, users: result.results || [] });
   }
@@ -219,22 +251,25 @@ async function route(request, env) {
   if (path === "/api/users" && method === "POST") {
     if (!requireRole(user, ["admin"])) return error("forbidden", "Admin access required.", 403);
     const data = await bodyJson(request);
-    const name = String(data.name || "").trim();
-    const pin = String(data.pin || "").trim();
+    const username = String(data.username || "").trim().toLowerCase();
+    const name = String(data.name || username).trim();
+    const password = String(data.password || "");
     const role = ["admin","cashier","staff"].includes(data.role) ? data.role : "staff";
-    if (name.length < 2) return error("invalid_name", "Name is required.");
-    if (!/^\d{4,8}$/.test(pin)) return error("invalid_pin", "PIN must contain 4 to 8 digits.");
+
+    if (!/^[a-z0-9._-]{3,32}$/.test(username)) return error("invalid_username", "Invalid username.");
+    if (name.length < 2 || name.length > 80) return error("invalid_name", "Invalid name.");
+    if (password.length < 8 || password.length > 128) return error("invalid_password", "Password must be at least 8 characters.");
 
     const salt = randomHex(16);
-    const pinHash = await hashPin(pin, salt);
+    const passwordHash = await hashPassword(password, salt);
     try {
       const result = await env.DB.prepare(
-        "INSERT INTO users (name, role, pin_hash, pin_salt) VALUES (?,?,?,?)",
-      ).bind(name, role, pinHash, salt).run();
-      await audit(env, user.id, "create_user", "user", Number(result.meta.last_row_id), { name, role });
-      return json({ ok: true, id: result.meta.last_row_id, name, role }, 201);
+        "INSERT INTO users (username,name,role,pin_hash,pin_salt) VALUES (?,?,?,?,?)",
+      ).bind(username, name, role, passwordHash, salt).run();
+      await audit(env, user.id, "create_user", "user", Number(result.meta.last_row_id), { username, name, role });
+      return json({ ok: true, id: result.meta.last_row_id, username, name, role }, 201);
     } catch (e) {
-      return error("user_exists", "A user with this name already exists.", 409);
+      return error("user_exists", "A user with this username already exists.", 409);
     }
   }
 
@@ -246,25 +281,29 @@ async function route(request, env) {
     const target = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(targetId).first();
     if (!target) return error("not_found", "User not found.", 404);
 
-    let name = data.name === undefined ? target.name : String(data.name).trim();
-    let role = data.role === undefined ? target.role : String(data.role);
-    let active = data.active === undefined ? Number(target.active) : (data.active ? 1 : 0);
+    const username = data.username === undefined ? target.username : String(data.username).trim().toLowerCase();
+    const name = data.name === undefined ? target.name : String(data.name).trim();
+    const role = data.role === undefined ? target.role : String(data.role);
+    const active = data.active === undefined ? Number(target.active) : (data.active ? 1 : 0);
+
+    if (!/^[a-z0-9._-]{3,32}$/.test(username)) return error("invalid_username", "Invalid username.");
     if (!["admin","cashier","staff"].includes(role)) return error("invalid_role", "Invalid role.");
 
-    if (data.pin !== undefined) {
-      const pin = String(data.pin).trim();
-      if (!/^\d{4,8}$/.test(pin)) return error("invalid_pin", "PIN must contain 4 to 8 digits.");
+    if (data.password !== undefined) {
+      const password = String(data.password);
+      if (password.length < 8 || password.length > 128) return error("invalid_password", "Password must be at least 8 characters.");
       const salt = randomHex(16);
-      const pinHash = await hashPin(pin, salt);
+      const passwordHash = await hashPassword(password, salt);
       await env.DB.prepare(
-        "UPDATE users SET name=?, role=?, active=?, pin_hash=?, pin_salt=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-      ).bind(name, role, active, pinHash, salt, targetId).run();
+        "UPDATE users SET username=?, name=?, role=?, active=?, pin_hash=?, pin_salt=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      ).bind(username, name, role, active, passwordHash, salt, targetId).run();
     } else {
       await env.DB.prepare(
-        "UPDATE users SET name=?, role=?, active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-      ).bind(name, role, active, targetId).run();
+        "UPDATE users SET username=?, name=?, role=?, active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      ).bind(username, name, role, active, targetId).run();
     }
-    await audit(env, user.id, "update_user", "user", targetId, { name, role, active });
+
+    await audit(env, user.id, "update_user", "user", targetId, { username, name, role, active });
     return json({ ok: true });
   }
 

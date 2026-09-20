@@ -46,7 +46,9 @@ jobs:
         run: |
           set -euo pipefail
           test -f app/src/main/java/com/hazhanhasani/traditionalcafe/MainActivity.java
+          test -f app/src/main/java/com/hazhanhasani/traditionalcafe/AuthActivity.java
           grep -q 'public class MainActivity' app/src/main/java/com/hazhanhasani/traditionalcafe/MainActivity.java
+          grep -q 'public class AuthActivity' app/src/main/java/com/hazhanhasani/traditionalcafe/AuthActivity.java
 
       - name: Validate signing secrets
         env:
@@ -115,6 +117,7 @@ jobs:
           DEXDUMP="$ANDROID_HOME/build-tools/35.0.0/dexdump"
           unzip -p "$APK" classes.dex > "$RUNNER_TEMP/classes.dex"
           "$DEXDUMP" "$RUNNER_TEMP/classes.dex" | grep -F 'Class descriptor  : '\''Lcom/hazhanhasani/traditionalcafe/MainActivity;'\'''
+          "$DEXDUMP" "$RUNNER_TEMP/classes.dex" | grep -F 'Class descriptor  : '\''Lcom/hazhanhasani/traditionalcafe/AuthActivity;'\'''
 
       - name: Verify APK signature
         run: |
@@ -148,9 +151,19 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG"               dist/TraditionalCafe-release.apk               dist/TraditionalCafe-release.apk.sha256               --clobber
+            gh release upload "$RELEASE_TAG" \
+              dist/TraditionalCafe-release.apk \
+              dist/TraditionalCafe-release.apk.sha256 \
+              dist/update.json \
+              --clobber
           else
-            gh release create "$RELEASE_TAG"               dist/TraditionalCafe-release.apk               dist/TraditionalCafe-release.apk.sha256               --target "$GITHUB_SHA"               --title "TraditionalCafe $APP_VERSION_NAME"               --notes "Android update • versionCode: $APP_VERSION_CODE"
+            gh release create "$RELEASE_TAG" \
+              dist/TraditionalCafe-release.apk \
+              dist/TraditionalCafe-release.apk.sha256 \
+              dist/update.json \
+              --target "$GITHUB_SHA" \
+              --title "TraditionalCafe $APP_VERSION_NAME" \
+              --notes "Android update • versionCode: $APP_VERSION_CODE"
           fi
 
       - name: Upload signed APK

@@ -393,7 +393,13 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.RIGHT);
         titles.addView(title);
 
-        TextView subtitle = label("داشبورد مدیریت روزانه", 12, muted, false);
+        String sessionName = getSharedPreferences("session", MODE_PRIVATE).getString("name", "");
+        String sessionRole = getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff");
+        String roleLabel = "admin".equals(sessionRole) ? "مدیر" : ("cashier".equals(sessionRole) ? "صندوق‌دار" : "شاگرد");
+        String subtitleValue = sessionName == null || sessionName.isEmpty()
+                ? "داشبورد مدیریت روزانه"
+                : sessionName + " • " + roleLabel;
+        TextView subtitle = label(subtitleValue, 12, muted, false);
         subtitle.setGravity(Gravity.RIGHT);
         subtitle.setPadding(0, dp(3), 0, 0);
         titles.addView(subtitle);
