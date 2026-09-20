@@ -46,6 +46,9 @@
             android:name=".DailyReportActivity"
             android:exported="false" />
         <activity
+            android:name=".AuditLogActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity
