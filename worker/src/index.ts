@@ -1,3 +1,4 @@
+// audit-center-e2e-trigger: v1
 // full-debug-trigger: customer-ledger-complete-e2e
 // setup-key-sync-trigger: configured
 const JSON_HEADERS = {
