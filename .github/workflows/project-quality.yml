@@ -1,0 +1,91 @@
+name: Project Quality Gate
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - "worker/**"
+      - "migrations/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - ".github/workflows/project-quality.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Validate Jalali conversion
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/jalali/com/hazhanhasani/traditionalcafe"
+          cp app/src/main/java/com/hazhanhasani/traditionalcafe/JalaliDateTime.java             "$RUNNER_TEMP/jalali/com/hazhanhasani/traditionalcafe/"
+
+          cat > "$RUNNER_TEMP/jalali/TestJalali.java" <<'JAVA'
+          import com.hazhanhasani.traditionalcafe.JalaliDateTime;
+          import java.util.Arrays;
+
+          public class TestJalali {
+            private static void eq(int[] actual, int[] expected, String label) {
+              if (!Arrays.equals(actual, expected)) {
+                throw new RuntimeException(label + " expected=" + Arrays.toString(expected)
+                    + " actual=" + Arrays.toString(actual));
+              }
+            }
+
+            public static void main(String[] args) {
+              eq(JalaliDateTime.gregorianToJalali(2024,3,20), new int[]{1403,1,1}, "Nowruz 1403");
+              eq(JalaliDateTime.gregorianToJalali(2025,3,20), new int[]{1403,12,30}, "Esfand 1403");
+              eq(JalaliDateTime.gregorianToJalali(2026,3,21), new int[]{1405,1,1}, "Nowruz 1405");
+              eq(JalaliDateTime.jalaliToGregorian(1405,1,1), new int[]{2026,3,21}, "Reverse conversion");
+              System.out.println("Jalali conversion OK: " + JalaliDateTime.nowFull());
+            }
+          }
+          JAVA
+
+          javac -d "$RUNNER_TEMP/jalali/out"             "$RUNNER_TEMP/jalali/com/hazhanhasani/traditionalcafe/JalaliDateTime.java"             "$RUNNER_TEMP/jalali/TestJalali.java"
+          java -cp "$RUNNER_TEMP/jalali/out" TestJalali
+
+      - name: Check Worker syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp worker/src/index.ts "$RUNNER_TEMP/worker.mjs"
+          node --check "$RUNNER_TEMP/worker.mjs"
+
+      - name: Android lint
+        run: gradle --no-daemon :app:lintRelease
+
+      - name: Build debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Verify no signing files are committed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '\.(jks|keystore|p12|pem)$'; then
+            echo "Signing material must not be committed."
+            exit 1
+          fi
