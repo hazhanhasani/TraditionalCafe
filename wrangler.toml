@@ -1,3 +1,8 @@
 name = "traditionalcafe"
 main = "worker/src/index.ts"
 compatibility_date = "2026-09-20"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "traditionalcafe-db"
+database_id = "b8ed6f48-a066-4e90-bc50-f1f2b4123f6c"
