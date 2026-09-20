@@ -36,6 +36,17 @@ jobs:
           curl --fail --silent --show-error --retry 4 --retry-delay 2             "$API_BASE/api/setup/status" | tee setup-status.json
           grep -q '"ok":true' setup-status.json
 
+      - name: Check password hashing
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 4 --retry-delay 2 \
+            -X POST "$API_BASE/api/setup/crypto-check" \
+            -H 'Content-Type: application/json' \
+            -H "X-Setup-Key: $CAFE_SETUP_KEY" | tee crypto-check.json
+          grep -q '"ok":true' crypto-check.json
+          grep -q '"password_hashing":"ready"' crypto-check.json
+
       - name: Verify setup key and setup endpoint
         shell: bash
         run: |
