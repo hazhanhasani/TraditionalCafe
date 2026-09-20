@@ -227,10 +227,14 @@ public class DebugActivity extends Activity {
                 return ok(label, buildDebugDetails(response));
             }
             if ("/api/time".equals(path)) {
+                JalaliDateTime.syncServerUtc(response.optString("utc", ""));
                 return ok(
                         label,
                         response.optString("jalali", "") +
-                        " • " + response.optString("timezone", "")
+                        " • " + response.optString("timezone", "") +
+                        " • اختلاف ساعت دستگاه/سرور: " +
+                        JalaliDateTime.fa(String.valueOf(JalaliDateTime.getServerOffsetMillis())) +
+                        "ms"
                 );
             }
 
