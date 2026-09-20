@@ -6,19 +6,17 @@ on:
       version_name:
         description: "Version name"
         required: true
-        default: "0.1.1"
+        default: "0.1.5"
       version_code:
         description: "Version code (must always increase)"
         required: true
-        default: "2"
+        default: "100005"
   push:
     branches:
       - main
-    tags:
-      - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-release:
@@ -98,6 +96,9 @@ jobs:
           else
             export APP_VERSION_CODE="$((100000 + GITHUB_RUN_NUMBER))"
           fi
+          echo "APP_VERSION_NAME=$APP_VERSION_NAME" >> "$GITHUB_ENV"
+          echo "APP_VERSION_CODE=$APP_VERSION_CODE" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=v$APP_VERSION_NAME" >> "$GITHUB_ENV"
           echo "Building versionName=$APP_VERSION_NAME versionCode=$APP_VERSION_CODE"
           gradle --no-daemon clean :app:assembleRelease
 
@@ -122,6 +123,17 @@ jobs:
           mkdir -p dist
           cp app/build/outputs/apk/release/app-release.apk dist/TraditionalCafe-release.apk
           sha256sum dist/TraditionalCafe-release.apk > dist/TraditionalCafe-release.apk.sha256
+
+      - name: Publish update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG"               dist/TraditionalCafe-release.apk               dist/TraditionalCafe-release.apk.sha256               --clobber
+          else
+            gh release create "$RELEASE_TAG"               dist/TraditionalCafe-release.apk               dist/TraditionalCafe-release.apk.sha256               --target "$GITHUB_SHA"               --title "TraditionalCafe $APP_VERSION_NAME"               --notes "Android update • versionCode: $APP_VERSION_CODE"
+          fi
 
       - name: Upload signed APK
         uses: actions/upload-artifact@v4

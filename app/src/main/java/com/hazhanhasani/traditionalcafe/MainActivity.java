@@ -1,6 +1,10 @@
 package com.hazhanhasani.traditionalcafe;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.net.Uri;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -17,6 +21,14 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
 public class MainActivity extends Activity {
 
     private final int bg = Color.rgb(247, 243, 235);
@@ -32,6 +44,12 @@ public class MainActivity extends Activity {
     private final int green = Color.rgb(62, 135, 95);
     private final int divider = Color.rgb(235, 229, 220);
 
+    private static final String LATEST_RELEASE_API =
+            "https://api.github.com/repos/hazhanhasani/TraditionalCafe/releases/latest";
+    private static final String LATEST_APK_FALLBACK =
+            "https://github.com/hazhanhasani/TraditionalCafe/releases/latest/download/TraditionalCafe-release.apk";
+    private static final long AUTO_UPDATE_CHECK_INTERVAL_MS = 60L * 60L * 1000L;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -41,6 +59,156 @@ public class MainActivity extends Activity {
         window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         window.getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         setContentView(buildScreen());
+        checkForUpdates(false);
+    }
+
+    private void checkForUpdates(boolean force) {
+        long now = System.currentTimeMillis();
+        long lastCheck = getSharedPreferences("update_state", MODE_PRIVATE)
+                .getLong("last_check", 0L);
+
+        if (!force && now - lastCheck < AUTO_UPDATE_CHECK_INTERVAL_MS) {
+            return;
+        }
+
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(LATEST_RELEASE_API).openConnection();
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(8000);
+                connection.setRequestMethod("GET");
+                connection.setRequestProperty("Accept", "application/vnd.github+json");
+                connection.setRequestProperty("User-Agent", "TraditionalCafe-Android");
+                connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
+
+                int responseCode = connection.getResponseCode();
+                if (responseCode != HttpURLConnection.HTTP_OK) {
+                    throw new IllegalStateException("HTTP " + responseCode);
+                }
+
+                BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(connection.getInputStream())
+                );
+                StringBuilder body = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    body.append(line);
+                }
+                reader.close();
+
+                JSONObject release = new JSONObject(body.toString());
+                if (release.optBoolean("draft", false) || release.optBoolean("prerelease", false)) {
+                    return;
+                }
+
+                String remoteVersion = release.optString("tag_name", "").replaceFirst("^v", "");
+                String localVersion = getCurrentVersionName();
+                String apkUrl = findApkUrl(release.optJSONArray("assets"));
+
+                getSharedPreferences("update_state", MODE_PRIVATE)
+                        .edit()
+                        .putLong("last_check", System.currentTimeMillis())
+                        .apply();
+
+                if (isRemoteVersionNewer(remoteVersion, localVersion)) {
+                    runOnUiThread(() -> showUpdateDialog(remoteVersion, apkUrl));
+                } else if (force) {
+                    runOnUiThread(() ->
+                            Toast.makeText(this, "آخرین نسخه نصب است", Toast.LENGTH_SHORT).show()
+                    );
+                }
+            } catch (Exception error) {
+                if (force) {
+                    runOnUiThread(() ->
+                            Toast.makeText(
+                                    this,
+                                    "بررسی بروزرسانی انجام نشد؛ اتصال اینترنت را بررسی کنید.",
+                                    Toast.LENGTH_LONG
+                            ).show()
+                    );
+                }
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }).start();
+    }
+
+    private String getCurrentVersionName() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName == null ? "0.0.0" : info.versionName;
+        } catch (Exception ignored) {
+            return "0.0.0";
+        }
+    }
+
+    private String findApkUrl(JSONArray assets) {
+        if (assets != null) {
+            for (int i = 0; i < assets.length(); i++) {
+                JSONObject asset = assets.optJSONObject(i);
+                if (asset == null) continue;
+
+                String name = asset.optString("name", "");
+                if (name.endsWith(".apk")) {
+                    String url = asset.optString("browser_download_url", "");
+                    if (!url.isEmpty()) return url;
+                }
+            }
+        }
+        return LATEST_APK_FALLBACK;
+    }
+
+    private boolean isRemoteVersionNewer(String remote, String local) {
+        if (remote == null || remote.trim().isEmpty()) return false;
+
+        String[] remoteParts = remote.split("\\.");
+        String[] localParts = local == null ? new String[0] : local.split("\\.");
+        int length = Math.max(remoteParts.length, localParts.length);
+
+        for (int i = 0; i < length; i++) {
+            int remotePart = i < remoteParts.length ? numericVersionPart(remoteParts[i]) : 0;
+            int localPart = i < localParts.length ? numericVersionPart(localParts[i]) : 0;
+            if (remotePart > localPart) return true;
+            if (remotePart < localPart) return false;
+        }
+        return false;
+    }
+
+    private int numericVersionPart(String value) {
+        String digits = value == null ? "" : value.replaceAll("[^0-9].*$", "");
+        if (digits.isEmpty()) return 0;
+        try {
+            return Integer.parseInt(digits);
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    private void showUpdateDialog(String remoteVersion, String apkUrl) {
+        if (isFinishing()) return;
+
+        new AlertDialog.Builder(this)
+                .setTitle("بروزرسانی جدید آماده است")
+                .setMessage(
+                        "نسخه " + remoteVersion + " منتشر شده است.\n\n" +
+                        "برای دریافت قابلیت‌ها و اصلاحات جدید، برنامه را بروزرسانی کنید."
+                )
+                .setPositiveButton("دانلود بروزرسانی", (dialog, which) -> openUpdateUrl(apkUrl))
+                .setNegativeButton("بعداً", null)
+                .show();
+    }
+
+    private void openUpdateUrl(String apkUrl) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception error) {
+            Toast.makeText(this, "باز کردن لینک بروزرسانی ممکن نشد.", Toast.LENGTH_LONG).show();
+        }
     }
 
     private View buildScreen() {
@@ -120,6 +288,7 @@ public class MainActivity extends Activity {
 
         TextView settings = label("⋮", 30, ink, false);
         settings.setGravity(Gravity.CENTER);
+        settings.setOnClickListener(v -> checkForUpdates(true));
         LinearLayout.LayoutParams settingsLp = new LinearLayout.LayoutParams(dp(40), dp(46));
         row.addView(settings, settingsLp);
 
