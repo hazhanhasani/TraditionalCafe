@@ -21,7 +21,8 @@ const ROLE_PERMISSION_KEYS = [
   "view_all_shifts",
   "manage_inventory",
   "manage_customer_limits",
-  "adjust_customer_ledger"
+  "adjust_customer_ledger",
+  "view_audit_log"
 ];
 
 function json(body, status = 200) {
@@ -279,6 +280,52 @@ async function buildRecipe(env, catalogType, catalogId) {
     low_components: lowComponents,
     ingredients,
   };
+}
+
+function auditCategory(action) {
+  const value = String(action || "");
+  if ([
+    "setup_user","login","create_user","update_user","update_role_permissions"
+  ].includes(value)) return "security";
+
+  if ([
+    "open_order","add_order_item","update_order_item_qty","delete_order_item",
+    "settle_order","reverse_settlement","cancel_order","merge_orders",
+    "transfer_order","hard_delete_order"
+  ].includes(value)) return "sales";
+
+  if ([
+    "open_shift","close_shift","create_expense","customer_payment",
+    "customer_ledger_adjustment"
+  ].includes(value)) return "finance";
+
+  if ([
+    "create_inventory_item","update_inventory_item","inventory_movement",
+    "create_inventory_link","delete_inventory_link","update_recipe"
+  ].includes(value)) return "inventory";
+
+  if ([
+    "create_catalog_category","update_catalog_category","create_catalog_item",
+    "update_catalog_item","create_hookah"
+  ].includes(value)) return "catalog";
+
+  if (["create_customer","update_customer"].includes(value)) return "customers";
+  return "system";
+}
+
+function auditSeverity(action) {
+  const value = String(action || "");
+  if ([
+    "hard_delete_order","reverse_settlement","update_role_permissions",
+    "customer_ledger_adjustment"
+  ].includes(value)) return "critical";
+
+  if ([
+    "cancel_order","update_user","delete_order_item","delete_inventory_link",
+    "inventory_movement","transfer_order","merge_orders"
+  ].includes(value)) return "attention";
+
+  return "normal";
 }
 
 async function audit(env, userId, action, entityType = null, entityId = null, details = null) {
@@ -3805,13 +3852,221 @@ async function route(request, env) {
   }
 
   if (path === "/api/audit" && method === "GET") {
-    if (!requireRole(user, ["admin"])) return error("forbidden", "Admin access required.", 403);
-    const result = await env.DB.prepare(
-      `SELECT a.*, u.name AS user_name
-       FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id
-       ORDER BY a.id DESC LIMIT 300`,
+    if (!(await hasPermission(env, user, "view_audit_log"))) {
+      return error("forbidden", "مجوز مشاهده مرکز فعالیت‌ها فعال نیست.", 403);
+    }
+
+    const userId = Math.max(0, Number(url.searchParams.get("user_id") || 0));
+    const category = String(url.searchParams.get("category") || "").trim().toLowerCase();
+    const action = String(url.searchParams.get("action") || "").trim();
+    const entityType = String(url.searchParams.get("entity_type") || "").trim();
+    const date = String(url.searchParams.get("date") || "").trim();
+    const q = String(url.searchParams.get("q") || "").trim().slice(0, 120);
+    const beforeId = Math.max(0, Number(url.searchParams.get("before_id") || 0));
+    const limit = Math.min(150, Math.max(1, Number(url.searchParams.get("limit") || 60)));
+
+    if (category && ![
+      "sales","finance","inventory","catalog","customers","security","system"
+    ].includes(category)) {
+      return error("invalid_category", "دسته فعالیت معتبر نیست.");
+    }
+
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return error("invalid_date", "تاریخ فیلتر معتبر نیست.");
+    }
+
+    const where = [];
+    const binds = [];
+
+    if (userId > 0) {
+      where.push("a.user_id=?");
+      binds.push(userId);
+    }
+    if (action) {
+      where.push("a.action=?");
+      binds.push(action);
+    }
+    if (entityType) {
+      where.push("a.entity_type=?");
+      binds.push(entityType);
+    }
+    if (date) {
+      where.push("date(a.created_at,'+3 hours','+30 minutes')=date(?)");
+      binds.push(date);
+    }
+    if (q) {
+      const like = "%" + q + "%";
+      where.push(
+        "(a.action LIKE ? OR a.entity_type LIKE ? OR a.details LIKE ? OR u.name LIKE ? OR u.username LIKE ?)"
+      );
+      binds.push(like,like,like,like,like);
+    }
+
+    const categoryActions = {
+      sales:[
+        "open_order","add_order_item","update_order_item_qty","delete_order_item",
+        "settle_order","reverse_settlement","cancel_order","merge_orders",
+        "transfer_order","hard_delete_order"
+      ],
+      finance:[
+        "open_shift","close_shift","create_expense","customer_payment",
+        "customer_ledger_adjustment"
+      ],
+      inventory:[
+        "create_inventory_item","update_inventory_item","inventory_movement",
+        "create_inventory_link","delete_inventory_link","update_recipe"
+      ],
+      catalog:[
+        "create_catalog_category","update_catalog_category","create_catalog_item",
+        "update_catalog_item","create_hookah"
+      ],
+      customers:["create_customer","update_customer"],
+      security:["setup_user","login","create_user","update_user","update_role_permissions"],
+      system:["create_table"]
+    };
+
+    if (category) {
+      const actions = categoryActions[category] || [];
+      if (category === "system") {
+        const known = Object.entries(categoryActions)
+          .filter(([key]) => key !== "system")
+          .flatMap(([,items]) => items);
+        where.push(
+          "(a.action IN (" + actions.map(() => "?").join(",") + ")" +
+          " OR a.action NOT IN (" + known.map(() => "?").join(",") + "))"
+        );
+        binds.push(...actions,...known);
+      } else {
+        where.push("a.action IN (" + actions.map(() => "?").join(",") + ")");
+        binds.push(...actions);
+      }
+    }
+
+    if (beforeId > 0) {
+      where.push("a.id<?");
+      binds.push(beforeId);
+    }
+
+    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+
+    const rows = await env.DB.prepare(
+      `SELECT a.id,a.user_id,a.action,a.entity_type,a.entity_id,a.details,a.created_at,
+              u.name AS user_name,u.username,u.role AS user_role
+       FROM audit_logs a
+       LEFT JOIN users u ON u.id=a.user_id
+       ${whereSql}
+       ORDER BY a.id DESC
+       LIMIT ${limit}`
+    ).bind(...binds).all();
+
+    const logs = (rows.results || []).map((row) => ({
+      ...row,
+      category:auditCategory(row.action),
+      severity:auditSeverity(row.action)
+    }));
+
+    const summaryWhere = [];
+    const summaryBinds = [];
+    if (userId > 0) {
+      summaryWhere.push("a.user_id=?");
+      summaryBinds.push(userId);
+    }
+    if (action) {
+      summaryWhere.push("a.action=?");
+      summaryBinds.push(action);
+    }
+    if (entityType) {
+      summaryWhere.push("a.entity_type=?");
+      summaryBinds.push(entityType);
+    }
+    if (date) {
+      summaryWhere.push("date(a.created_at,'+3 hours','+30 minutes')=date(?)");
+      summaryBinds.push(date);
+    }
+    if (q) {
+      const like = "%" + q + "%";
+      summaryWhere.push(
+        "(a.action LIKE ? OR a.entity_type LIKE ? OR a.details LIKE ? OR u.name LIKE ? OR u.username LIKE ?)"
+      );
+      summaryBinds.push(like,like,like,like,like);
+    }
+    if (category) {
+      const actions = categoryActions[category] || [];
+      if (category === "system") {
+        const known = Object.entries(categoryActions)
+          .filter(([key]) => key !== "system")
+          .flatMap(([,items]) => items);
+        summaryWhere.push(
+          "(a.action IN (" + actions.map(() => "?").join(",") + ")" +
+          " OR a.action NOT IN (" + known.map(() => "?").join(",") + "))"
+        );
+        summaryBinds.push(...actions,...known);
+      } else {
+        summaryWhere.push("a.action IN (" + actions.map(() => "?").join(",") + ")");
+        summaryBinds.push(...actions);
+      }
+    }
+
+    const summarySql = summaryWhere.length ? "WHERE " + summaryWhere.join(" AND ") : "";
+    const summary = await env.DB.prepare(
+      `SELECT COUNT(*) AS matched_count,
+              COUNT(DISTINCT a.user_id) AS active_users,
+              COALESCE(SUM(CASE WHEN a.action IN (
+                'hard_delete_order','reverse_settlement','update_role_permissions',
+                'customer_ledger_adjustment'
+              ) THEN 1 ELSE 0 END),0) AS critical_count
+       FROM audit_logs a
+       LEFT JOIN users u ON u.id=a.user_id
+       ${summarySql}`
+    ).bind(...summaryBinds).first();
+
+    const today = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM audit_logs
+       WHERE date(created_at,'+3 hours','+30 minutes')=date(?)`
+    ).bind(iranDateKey()).first();
+
+    const users = await env.DB.prepare(
+      `SELECT DISTINCT u.id,u.username,u.name,u.role,u.active
+       FROM audit_logs a
+       JOIN users u ON u.id=a.user_id
+       ORDER BY u.active DESC,u.name`
     ).all();
-    return json({ ok: true, logs: result.results || [] });
+
+    const actions = await env.DB.prepare(
+      `SELECT action,COUNT(*) AS count
+       FROM audit_logs
+       GROUP BY action
+       ORDER BY count DESC,action
+       LIMIT 100`
+    ).all();
+
+    const nextBeforeId = logs.length === limit
+      ? Number(logs[logs.length - 1].id)
+      : null;
+
+    return json({
+      ok:true,
+      timezone:IRAN_TIME_ZONE,
+      filters:{
+        user_id:userId || null,
+        category:category || null,
+        action:action || null,
+        entity_type:entityType || null,
+        date:date || null,
+        q:q || null
+      },
+      summary:{
+        matched_count:Number(summary?.matched_count || 0),
+        today_count:Number(today?.count || 0),
+        active_users:Number(summary?.active_users || 0),
+        critical_count:Number(summary?.critical_count || 0)
+      },
+      users:users.results || [],
+      actions:actions.results || [],
+      logs,
+      next_before_id:nextBeforeId
+    });
   }
 
   return error("not_found", "Route not found.", 404);
