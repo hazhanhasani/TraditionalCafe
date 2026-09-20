@@ -190,9 +190,11 @@ public class OrderActivity extends Activity {
             manage.setOnClickListener(v -> showOrderManagement());
             content.addView(manage);
         } else if ("settled".equals(status) && isPrivileged()) {
-            Button reverse = secondaryButton("برگرداندن تسویه اشتباه");
-            reverse.setOnClickListener(v -> showReverseSettlementDialog());
-            content.addView(reverse);
+            if (PermissionStore.has(this, "reverse_settlement")) {
+                Button reverse = secondaryButton("برگرداندن تسویه اشتباه");
+                reverse.setOnClickListener(v -> showReverseSettlementDialog());
+                content.addView(reverse);
+            }
 
             if (isAdmin()) {
                 Button delete = dangerButton("حذف کامل سفارش");
@@ -710,7 +712,7 @@ public class OrderActivity extends Activity {
         box.addView(totalView);
 
         EditText discount = numberField("مبلغ تخفیف", "0");
-        if ("staff".equals(role)) {
+        if (!PermissionStore.has(this, "apply_discount")) {
             discount.setEnabled(false);
             discount.setAlpha(0.55f);
         }
@@ -722,7 +724,9 @@ public class OrderActivity extends Activity {
         addLabeledNumberField(
                 box,
                 "تخفیف",
-                "staff".equals(role) ? "ثبت تخفیف فقط برای مدیر یا صندوق‌دار است" : "از مبلغ کل کم می‌شود",
+                PermissionStore.has(this, "apply_discount")
+                        ? "از مبلغ کل کم می‌شود"
+                        : "مجوز ثبت تخفیف برای این نقش فعال نیست",
                 discount
         );
         addLabeledNumberField(box, "نقدی", "مبلغی که نقد دریافت شده", cash);
