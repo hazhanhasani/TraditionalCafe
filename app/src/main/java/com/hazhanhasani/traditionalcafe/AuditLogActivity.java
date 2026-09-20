@@ -858,6 +858,11 @@ public class AuditLogActivity extends Activity {
         if ("balance_after".equals(key)) return "مانده بعد";
         if ("direction".equals(key)) return "جهت اصلاح";
         if ("permissions".equals(key)) return "مجوزها";
+        if ("backup_id".equals(key)) return "شناسه بکاپ";
+        if ("safety_backup_id".equals(key)) return "Snapshot ایمنی";
+        if ("restored_tables".equals(key)) return "جدول بازیابی‌شده";
+        if ("row_count".equals(key)) return "تعداد ردیف";
+        if ("size_bytes".equals(key)) return "حجم بکاپ";
         return key.replace("_", " ");
     }
 
@@ -1055,6 +1060,10 @@ public class AuditLogActivity extends Activity {
         if ("update_catalog_item".equals(action)) return "ویرایش آیتم منو";
         if ("create_hookah".equals(action)) return "ساخت قلیان";
         if ("create_table".equals(action)) return "ساخت میز";
+        if ("create_backup".equals(action)) return "ساخت بکاپ دستی";
+        if ("scheduled_backup".equals(action)) return "بکاپ خودکار روزانه";
+        if ("restore_backup".equals(action)) return "بازیابی بکاپ";
+        if ("delete_backup".equals(action)) return "حذف بکاپ";
         return action == null || action.isEmpty()
                 ? "فعالیت"
                 : action;
@@ -1076,6 +1085,7 @@ public class AuditLogActivity extends Activity {
         if ("service".equals(entity)) return "خدمت";
         if ("table".equals(entity)) return "میز";
         if ("role".equals(entity)) return "نقش";
+        if ("backup_snapshot".equals(entity)) return "نسخه پشتیبان";
         return entity == null ? "" : entity;
     }
 
