@@ -11,6 +11,15 @@ const JSON_HEADERS = {
 const encoder = new TextEncoder();
 const PASSWORD_KDF_ITERATIONS = 5000;
 const IRAN_TIME_ZONE = "Asia/Tehran";
+const ROLE_PERMISSION_KEYS = [
+  "view_all_orders",
+  "manage_catalog",
+  "manage_expenses",
+  "view_reports",
+  "reverse_settlement",
+  "apply_discount",
+  "view_all_shifts"
+];
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -134,6 +143,38 @@ function requireRole(user, roles) {
 function canManageOrder(user, order) {
   if (!user || !order) return false;
   return user.role !== "staff" || Number(order.opened_by) === Number(user.id);
+}
+
+async function rolePermissions(env, role) {
+  const defaults = {};
+  for (const key of ROLE_PERMISSION_KEYS) {
+    defaults[key] = role === "admin" || role === "cashier";
+  }
+  if (role === "staff") {
+    for (const key of ROLE_PERMISSION_KEYS) defaults[key] = false;
+    return defaults;
+  }
+  if (role === "admin") return defaults;
+
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT permission, allowed FROM role_permissions WHERE role=?"
+    ).bind(role).all();
+    for (const row of rows.results || []) {
+      if (ROLE_PERMISSION_KEYS.includes(row.permission)) {
+        defaults[row.permission] = Number(row.allowed) === 1;
+      }
+    }
+  } catch {}
+  return defaults;
+}
+
+async function hasPermission(env, user, permission) {
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  if (user.role === "staff") return false;
+  const permissions = await rolePermissions(env, user.role);
+  return permissions[permission] === true;
 }
 
 async function audit(env, userId, action, entityType = null, entityId = null, details = null) {
@@ -370,10 +411,12 @@ async function route(request, env) {
       ).bind(userId, tokenHash).run();
 
       await audit(env, userId, "setup_user", "user", userId, { username, name, role });
+      const permissions = await rolePermissions(env, role);
       return json({
         ok: true,
         token,
         user: { id: userId, username, name, role },
+        permissions,
         expires_in_days: 30,
       }, 201);
     } catch (e) {
@@ -411,10 +454,12 @@ async function route(request, env) {
     ).bind(user.id, tokenHash).run();
     await audit(env, user.id, "login", "user", user.id);
 
+    const permissions = await rolePermissions(env, user.role);
     return json({
       ok: true,
       token,
       user: { id: user.id, username: user.username, name: user.name, role: user.role },
+      permissions,
       expires_in_days: 30,
     });
   }
@@ -429,7 +474,11 @@ async function route(request, env) {
   }
 
   if (path === "/api/me" && method === "GET") {
-    return json({ ok: true, user });
+    return json({
+      ok: true,
+      user,
+      permissions: await rolePermissions(env, user.role),
+    });
   }
 
   if (path === "/api/shifts/current" && method === "GET") {
@@ -487,8 +536,8 @@ async function route(request, env) {
   }
 
   if (path === "/api/shifts" && method === "GET") {
-    if (!requireRole(user, ["admin","cashier"])) {
-      return error("forbidden", "مشاهده شیفت‌های همه کاربران فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    if (!(await hasPermission(env, user, "view_all_shifts"))) {
+      return error("forbidden", "مجوز مشاهده شیفت‌های همه کاربران فعال نیست.", 403);
     }
 
     const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 100)));
@@ -590,7 +639,17 @@ async function route(request, env) {
   if (path === "/api/users" && method === "GET") {
     if (!requireRole(user, ["admin"])) return error("forbidden", "Admin access required.", 403);
     const result = await env.DB.prepare(
-      "SELECT id, username, name, role, active, created_at, updated_at FROM users ORDER BY id",
+      `SELECT u.id, u.username, u.name, u.role, u.active, u.created_at, u.updated_at,
+              (SELECT MAX(a.created_at) FROM audit_logs a
+               WHERE a.user_id=u.id AND a.action='login') AS last_login,
+              (SELECT MAX(a.created_at) FROM audit_logs a
+               WHERE a.user_id=u.id) AS last_activity,
+              CASE WHEN EXISTS(
+                SELECT 1 FROM cash_shifts s
+                WHERE s.user_id=u.id AND s.status='open'
+              ) THEN 1 ELSE 0 END AS has_open_shift
+       FROM users u
+       ORDER BY u.active DESC, u.id`
     ).all();
     return json({ ok: true, users: result.results || [] });
   }
@@ -628,42 +687,169 @@ async function route(request, env) {
 
   const userMatch = path.match(/^\/api\/users\/(\d+)$/);
   if (userMatch && method === "PATCH") {
-    if (!requireRole(user, ["admin"])) return error("forbidden", "Admin access required.", 403);
+    if (!requireRole(user, ["admin"])) return error("forbidden", "فقط مدیر به مدیریت کاربران دسترسی دارد.", 403);
+
     const targetId = Number(userMatch[1]);
     const data = await bodyJson(request);
-    const target = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(targetId).first();
-    if (!target) return error("not_found", "User not found.", 404);
+    const target = await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(targetId).first();
+    if (!target) return error("not_found", "کاربر پیدا نشد.", 404);
 
-    const username = data.username === undefined ? target.username : String(data.username).trim().toLowerCase();
+    const username = data.username === undefined
+      ? target.username
+      : String(data.username).trim().toLowerCase();
     const name = data.name === undefined ? target.name : String(data.name).trim();
     const role = data.role === undefined ? target.role : String(data.role);
     const active = data.active === undefined ? Number(target.active) : (data.active ? 1 : 0);
 
-    if (!/^[a-z0-9._-]{3,32}$/.test(username)) return error("invalid_username", "Invalid username.");
-    if (!["admin","cashier","staff"].includes(role)) return error("invalid_role", "Invalid role.");
+    if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+      return error("invalid_username", "نام کاربری باید ۳ تا ۳۲ کاراکتر انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.");
+    }
+    if (name.length < 2 || name.length > 80) {
+      return error("invalid_name", "نام نمایشی معتبر نیست.");
+    }
+    if (!["admin","cashier","staff"].includes(role)) {
+      return error("invalid_role", "نقش کاربر معتبر نیست.");
+    }
 
-    if (data.password !== undefined) {
+    if (targetId === Number(user.id) && active !== 1) {
+      return error("cannot_disable_self", "نمی‌توانید حساب فعلی خودتان را غیرفعال کنید.", 409);
+    }
+
+    if (target.role === "admin" && (role !== "admin" || active !== 1)) {
+      const otherAdmins = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM users WHERE role='admin' AND active=1 AND id<>?"
+      ).bind(targetId).first();
+      if (Number(otherAdmins?.count || 0) === 0) {
+        return error("last_admin", "آخرین مدیر فعال سیستم را نمی‌توان غیرفعال یا تغییر نقش داد.", 409);
+      }
+    }
+
+    let passwordChanged = false;
+    if (data.password !== undefined && String(data.password).length > 0) {
       const password = String(data.password);
-      if (password.length < 8 || password.length > 128) return error("invalid_password", "Password must be at least 8 characters.");
+      if (password.length < 8 || password.length > 128) {
+        return error("invalid_password", "رمز عبور باید حداقل ۸ کاراکتر باشد.");
+      }
       const salt = randomHex(16);
       let passwordHash;
       try {
         passwordHash = await hashPassword(password, salt);
       } catch (e) {
-        console.error("update_user_password_hash_failed", e);
         return error("password_hash_failed", "خطا در پردازش امن رمز عبور.", 503);
       }
       await env.DB.prepare(
-        "UPDATE users SET username=?, name=?, role=?, active=?, pin_hash=?, pin_salt=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        `UPDATE users
+         SET username=?, name=?, role=?, active=?,
+             pin_hash=?, pin_salt=?, updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
       ).bind(username, name, role, active, passwordHash, salt, targetId).run();
+      passwordChanged = true;
     } else {
       await env.DB.prepare(
-        "UPDATE users SET username=?, name=?, role=?, active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        `UPDATE users
+         SET username=?, name=?, role=?, active=?, updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
       ).bind(username, name, role, active, targetId).run();
     }
 
-    await audit(env, user.id, "update_user", "user", targetId, { username, name, role, active });
-    return json({ ok: true });
+    if (passwordChanged || active !== 1) {
+      await env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(targetId).run();
+    }
+
+    await audit(env, user.id, "update_user", "user", targetId, {
+      username,
+      name,
+      role,
+      active,
+      password_changed: passwordChanged,
+    });
+
+    return json({ ok: true, id: targetId, username, name, role, active });
+  }
+
+  const userActivity = path.match(/^\/api\/users\/(\d+)\/activity$/);
+  if (userActivity && method === "GET") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "فقط مدیر به فعالیت کاربران دسترسی دارد.", 403);
+    }
+    const targetId = Number(userActivity[1]);
+    const target = await env.DB.prepare(
+      "SELECT id, username, name, role, active FROM users WHERE id=?"
+    ).bind(targetId).first();
+    if (!target) return error("not_found", "کاربر پیدا نشد.", 404);
+
+    const logs = await env.DB.prepare(
+      `SELECT id, action, entity_type, entity_id, details, created_at
+       FROM audit_logs
+       WHERE user_id=?
+       ORDER BY id DESC
+       LIMIT 100`
+    ).bind(targetId).all();
+
+    return json({ ok: true, user: target, activity: logs.results || [] });
+  }
+
+  if (path === "/api/role-permissions" && method === "GET") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "فقط مدیر به تنظیم مجوز نقش‌ها دسترسی دارد.", 403);
+    }
+
+    return json({
+      ok: true,
+      keys: ROLE_PERMISSION_KEYS,
+      roles: {
+        admin: await rolePermissions(env, "admin"),
+        cashier: await rolePermissions(env, "cashier"),
+        staff: await rolePermissions(env, "staff"),
+      },
+      locked_roles: ["admin","staff"],
+    });
+  }
+
+  const permissionRole = path.match(/^\/api\/role-permissions\/(admin|cashier|staff)$/);
+  if (permissionRole && method === "PATCH") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "فقط مدیر به تنظیم مجوز نقش‌ها دسترسی دارد.", 403);
+    }
+
+    const roleName = permissionRole[1];
+    if (roleName !== "cashier") {
+      return error(
+        "role_permissions_locked",
+        roleName === "staff"
+          ? "مجوزهای شاگرد برای حفظ محدودیت فروش شخصی و نسیه قفل هستند."
+          : "مجوزهای مدیر به‌صورت کامل و ثابت فعال هستند.",
+        409
+      );
+    }
+
+    const data = await bodyJson(request);
+    const permissions = data.permissions && typeof data.permissions === "object"
+      ? data.permissions
+      : {};
+
+    const statements = [];
+    for (const key of ROLE_PERMISSION_KEYS) {
+      if (permissions[key] === undefined) continue;
+      const allowed = permissions[key] ? 1 : 0;
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO role_permissions (role, permission, allowed, updated_at)
+           VALUES (?,?,?,CURRENT_TIMESTAMP)
+           ON CONFLICT(role,permission)
+           DO UPDATE SET allowed=excluded.allowed, updated_at=CURRENT_TIMESTAMP`
+        ).bind(roleName, key, allowed)
+      );
+    }
+    if (statements.length) await env.DB.batch(statements);
+
+    const resolved = await rolePermissions(env, roleName);
+    await audit(env, user.id, "update_role_permissions", "role", null, {
+      role: roleName,
+      permissions: resolved,
+    });
+
+    return json({ ok: true, role: roleName, permissions: resolved });
   }
 
   if (path === "/api/debug" && method === "GET") {
@@ -892,7 +1078,9 @@ async function route(request, env) {
   }
 
   if (path === "/api/tables" && method === "POST") {
-    if (!requireRole(user, ["admin","cashier"])) return error("forbidden", "Insufficient access.", 403);
+    if (!(await hasPermission(env, user, "view_reports"))) {
+      return error("forbidden", "مجوز مشاهده گزارش‌ها فعال نیست.", 403);
+    }
     const data = await bodyJson(request);
     const name = String(data.name || "").trim();
     if (!name) return error("invalid_name", "Table name is required.");
@@ -1006,8 +1194,8 @@ async function route(request, env) {
   }
 
   if (path === "/api/catalog" && method === "POST") {
-    if (!requireRole(user, ["admin","cashier"])) {
-      return error("forbidden", "تعریف منو فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    if (!(await hasPermission(env, user, "manage_catalog"))) {
+      return error("forbidden", "مجوز تعریف و ویرایش منو فعال نیست.", 403);
     }
     const data = await bodyJson(request);
     const type = String(data.type || "").toLowerCase();
@@ -1038,8 +1226,8 @@ async function route(request, env) {
 
   const catalogItem = path.match(/^\/api\/catalog\/(hookah|service)\/(\d+)$/);
   if (catalogItem && method === "PATCH") {
-    if (!requireRole(user, ["admin","cashier"])) {
-      return error("forbidden", "ویرایش منو فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    if (!(await hasPermission(env, user, "manage_catalog"))) {
+      return error("forbidden", "مجوز تعریف و ویرایش منو فعال نیست.", 403);
     }
     const type = catalogItem[1];
     const id = Number(catalogItem[2]);
@@ -1088,7 +1276,8 @@ async function route(request, env) {
       binds.push(validStatus);
     }
 
-    if (user.role === "staff") {
+    const canViewAllOrders = await hasPermission(env, user, "view_all_orders");
+    if (!canViewAllOrders) {
       where.push("o.opened_by=?");
       binds.push(user.id);
       where.push("date(o.opened_at,'+3 hours','+30 minutes')=date(?)");
@@ -1111,7 +1300,7 @@ async function route(request, env) {
     const result = await env.DB.prepare(sql).bind(...binds).all();
     return json({
       ok: true,
-      scope: user.role === "staff" ? "self_today" : "all",
+      scope: canViewAllOrders ? "all" : "self_today",
       orders: result.results || [],
     });
   }
@@ -1373,8 +1562,8 @@ async function route(request, env) {
 
   const reverseSettlement = path.match(/^\/api\/orders\/(\d+)\/reverse-settlement$/);
   if (reverseSettlement && method === "POST") {
-    if (!requireRole(user, ["admin","cashier"])) {
-      return error("forbidden", "برگرداندن تسویه فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    if (!(await hasPermission(env, user, "reverse_settlement"))) {
+      return error("forbidden", "مجوز برگرداندن تسویه فعال نیست.", 403);
     }
 
     const orderId = Number(reverseSettlement[1]);
@@ -1587,8 +1776,8 @@ async function route(request, env) {
     const data = await bodyJson(request);
     const discount = intAmount(data.discount || 0);
     if (discount === null) return error("invalid_discount", "Invalid discount.");
-    if (user.role === "staff" && discount > 0) {
-      return error("forbidden", "ثبت تخفیف فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    if (discount > 0 && !(await hasPermission(env, user, "apply_discount"))) {
+      return error("forbidden", "مجوز ثبت تخفیف فعال نیست.", 403);
     }
 
     await env.DB.prepare("UPDATE orders SET discount=? WHERE id=?").bind(discount, orderId).run();
@@ -1725,8 +1914,8 @@ async function route(request, env) {
   }
 
   if (path === "/api/expenses" && method === "GET") {
-    if (!requireRole(user, ["admin","cashier"])) {
-      return error("forbidden", "هزینه‌ها فقط برای مدیر یا صندوق‌دار قابل مشاهده است.", 403);
+    if (!(await hasPermission(env, user, "manage_expenses"))) {
+      return error("forbidden", "مجوز مشاهده هزینه‌ها فعال نیست.", 403);
     }
     const result = await env.DB.prepare(
       `SELECT e.*, u.name AS created_by_name
@@ -1737,8 +1926,8 @@ async function route(request, env) {
   }
 
   if (path === "/api/expenses" && method === "POST") {
-    if (!requireRole(user, ["admin","cashier"])) {
-      return error("forbidden", "ثبت هزینه فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    if (!(await hasPermission(env, user, "manage_expenses"))) {
+      return error("forbidden", "مجوز ثبت هزینه فعال نیست.", 403);
     }
     const shift = await getOpenShift(env, user.id);
     if (!shift) {
