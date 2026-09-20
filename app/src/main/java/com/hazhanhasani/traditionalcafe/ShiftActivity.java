@@ -218,6 +218,7 @@ public class ShiftActivity extends Activity {
         addMoneyRow(card, "کارت / کارتخوان", shift.optLong("card_sales", 0L), ink);
         addMoneyRow(card, "کارت‌به‌کارت", shift.optLong("transfer_sales", 0L), ink);
         addMoneyRow(card, "نسیه", shift.optLong("credit_sales", 0L), brown);
+        addMoneyRow(card, "وصول بدهی مشتریان", shift.optLong("debt_collections_total", 0L), turquoise);
 
         if (!"staff".equals(role)) {
             addMoneyRow(card, "هزینه نقدی شیفت", shift.optLong("cash_expenses", 0L), red);
@@ -407,6 +408,7 @@ public class ShiftActivity extends Activity {
                             "\nکارت / کارتخوان: " + money(shift.optLong("card_sales", 0L)) +
                             "\nکارت‌به‌کارت: " + money(shift.optLong("transfer_sales", 0L)) +
                             "\nنسیه: " + money(shift.optLong("credit_sales", 0L)) +
+                            "\nوصول بدهی: " + money(shift.optLong("debt_collections_total", 0L)) +
                             "\nتعداد سفارش: " + JalaliDateTime.fa(String.valueOf(
                                     shift.optLong("settled_orders", 0L)
                             ));

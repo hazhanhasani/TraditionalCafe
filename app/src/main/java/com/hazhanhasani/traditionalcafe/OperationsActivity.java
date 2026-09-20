@@ -403,21 +403,48 @@ public class OperationsActivity extends Activity {
     }
 
     private void showDebtPayment(long customerId) {
+        LinearLayout box = dialogBox();
+
         EditText amount = field("مبلغ پرداختی (تومان)", false);
         amount.setInputType(InputType.TYPE_CLASS_NUMBER);
 
+        TextView methodLabel = text("روش دریافت", 12, ink, true);
+        methodLabel.setGravity(Gravity.RIGHT);
+        methodLabel.setPadding(dp(4), dp(5), dp(4), dp(5));
+
+        Spinner method = new Spinner(this);
+        String[] methods = new String[]{"نقدی", "کارت / کارتخوان", "کارت‌به‌کارت"};
+        method.setAdapter(new ArrayAdapter<>(
+                this,
+                android.R.layout.simple_spinner_dropdown_item,
+                methods
+        ));
+
+        box.addView(amount);
+        box.addView(methodLabel);
+        box.addView(method, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)
+        ));
+
         new AlertDialog.Builder(this)
-                .setTitle("ثبت پرداخت")
-                .setView(amount)
+                .setTitle("ثبت پرداخت بدهی")
+                .setMessage("این دریافت در شیفت جاری شما ثبت می‌شود.")
+                .setView(box)
                 .setPositiveButton("ثبت", (d,w) -> {
                     new Thread(() -> {
                         try {
                             long value = parseLong(amount.getText().toString());
                             JSONObject body = new JSONObject();
                             body.put("amount", value);
+
+                            String paymentMethod = method.getSelectedItemPosition() == 1
+                                    ? "card"
+                                    : method.getSelectedItemPosition() == 2 ? "transfer" : "cash";
+                            body.put("payment_method", paymentMethod);
+
                             ApiClient.post(this, "/api/customers/" + customerId + "/payment", body);
                             runOnUiThread(() -> {
-                                Toast.makeText(this, "پرداخت ثبت شد.", Toast.LENGTH_SHORT).show();
+                                Toast.makeText(this, "پرداخت در شیفت ثبت شد.", Toast.LENGTH_SHORT).show();
                                 reload();
                             });
                         } catch (Exception e) {

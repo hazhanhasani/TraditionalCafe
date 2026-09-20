@@ -71,6 +71,12 @@ jobs:
           const token = created.token;
           assert(token, "admin token missing");
 
+          const shiftOpened = await request("/api/shifts/open", "POST", {
+            opening_cash: 100000
+          }, token);
+          const shiftId = shiftOpened.shift.id;
+          assert(shiftOpened.shift.opening_cash === 100000, "opening cash mismatch");
+
           const a = await request("/api/tables", "POST", { name: tableA }, token);
           const b = await request("/api/tables", "POST", { name: tableB }, token);
           const service = await request("/api/catalog", "POST", {
@@ -126,6 +132,10 @@ jobs:
           }, token);
           assert(settled.ok === true, "settlement failed");
 
+          const shiftAfterSale = await request("/api/shifts/current", "GET", null, token);
+          assert(shiftAfterSale.shift.cash_sales === 50000, "shift cash sales mismatch");
+          assert(shiftAfterSale.shift.expected_cash_live === 150000, "shift expected cash after sale mismatch");
+
           const reversed = await request("/api/orders/" + openA.order_id + "/reverse-settlement", "POST", {
             reason: "E2E reversal test"
           }, token);
@@ -142,6 +152,27 @@ jobs:
           const deletedSource = await request("/api/orders/" + openB.order_id, "DELETE", null, token);
           assert(Number(deletedSource.deleted_order_id) === Number(openB.order_id), "hard delete source failed");
 
+          const expenseDescription = "E2E expense " + suffix;
+          await request("/api/expenses", "POST", {
+            category: "E2E",
+            amount: 5000,
+            description: expenseDescription,
+            payment_method: "cash"
+          }, token);
+
+          const shiftBeforeClose = await request("/api/shifts/current", "GET", null, token);
+          assert(shiftBeforeClose.shift.cash_sales === 0, "reversed sale must not remain in shift");
+          assert(shiftBeforeClose.shift.cash_expenses === 5000, "shift cash expense mismatch");
+          assert(shiftBeforeClose.shift.expected_cash_live === 95000, "expected cash before close mismatch");
+
+          const closedShift = await request("/api/shifts/" + shiftId + "/close", "POST", {
+            counted_cash: 94000,
+            note: "E2E shift close"
+          }, token);
+          assert(closedShift.shift.status === "closed", "shift close failed");
+          assert(closedShift.shift.expected_cash === 95000, "closed expected cash mismatch");
+          assert(closedShift.shift.cash_difference === -1000, "cash difference mismatch");
+
           console.log("ORDER_MANAGEMENT_E2E_OK", {
             itemEdit: true,
             itemDelete: true,
@@ -150,7 +181,10 @@ jobs:
             settle: true,
             reverseSettlement: true,
             cancel: true,
-            hardDelete: true
+            hardDelete: true,
+            shiftOpen: true,
+            shiftAccounting: true,
+            shiftClose: true
           });
           NODE
 
@@ -164,6 +198,7 @@ jobs:
           TABLE_A="E2E-A-${SUFFIX}"
           TABLE_B="E2E-B-${SUFFIX}"
           SERVICE="E2E-Service-${SUFFIX}"
+          EXPENSE_DESC="E2E expense ${SUFFIX}"
 
           SQL="
           DELETE FROM customer_ledger WHERE order_id IN (
@@ -185,7 +220,9 @@ jobs:
             SELECT id FROM cafe_tables WHERE name IN ('$TABLE_A','$TABLE_B')
           );
           DELETE FROM cafe_tables WHERE name IN ('$TABLE_A','$TABLE_B');
+          DELETE FROM expenses WHERE description='$EXPENSE_DESC';
           DELETE FROM service_catalog WHERE name='$SERVICE';
+          DELETE FROM cash_shifts WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM audit_logs WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM users WHERE username='$USERNAME';

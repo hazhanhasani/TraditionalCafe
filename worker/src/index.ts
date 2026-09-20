@@ -176,6 +176,13 @@ async function buildShiftSummary(env, shift) {
      WHERE shift_id=?`
   ).bind(shift.id).first();
 
+  const collections = await env.DB.prepare(
+    `SELECT payment_method, COALESCE(SUM(-amount),0) AS amount
+     FROM customer_ledger
+     WHERE shift_id=? AND entry_type='payment'
+     GROUP BY payment_method`
+  ).bind(shift.id).all();
+
   const orders = await env.DB.prepare(
     `SELECT COUNT(DISTINCT order_id) AS count
      FROM payments
@@ -189,9 +196,22 @@ async function buildShiftSummary(env, shift) {
     }
   }
 
+  const collectionTotals = { cash: 0, card: 0, transfer: 0 };
+  for (const row of collections.results || []) {
+    if (Object.prototype.hasOwnProperty.call(collectionTotals, row.payment_method)) {
+      collectionTotals[row.payment_method] = Number(row.amount || 0);
+    }
+  }
+
   const salesTotal = totals.cash + totals.card + totals.transfer + totals.credit;
+  const collectionsTotal =
+    collectionTotals.cash + collectionTotals.card + collectionTotals.transfer;
   const cashExpenses = Number(expenses?.cash_amount || 0);
-  const expectedCash = Number(shift.opening_cash || 0) + totals.cash - cashExpenses;
+  const expectedCash =
+    Number(shift.opening_cash || 0) +
+    totals.cash +
+    collectionTotals.cash -
+    cashExpenses;
 
   return {
     id: Number(shift.id),
@@ -213,6 +233,10 @@ async function buildShiftSummary(env, shift) {
     card_sales: totals.card,
     transfer_sales: totals.transfer,
     credit_sales: totals.credit,
+    debt_collections_total: collectionsTotal,
+    debt_collection_cash: collectionTotals.cash,
+    debt_collection_card: collectionTotals.card,
+    debt_collection_transfer: collectionTotals.transfer,
     expenses_total: Number(expenses?.total || 0),
     cash_expenses: cashExpenses,
     expected_cash_live: expectedCash,
@@ -1355,10 +1379,23 @@ async function route(request, env) {
 
     const orderId = Number(reverseSettlement[1]);
     const current = await env.DB.prepare(
-      "SELECT id, status, total, table_id, closed_at FROM orders WHERE id=?"
+      "SELECT id, status, total, table_id, closed_at, settled_shift_id FROM orders WHERE id=?"
     ).bind(orderId).first();
     if (!current || current.status !== "settled") {
       return error("not_settled", "این سفارش در وضعیت تسویه‌شده نیست.", 409);
+    }
+
+    if (current.settled_shift_id) {
+      const settledShift = await env.DB.prepare(
+        "SELECT status FROM cash_shifts WHERE id=?"
+      ).bind(current.settled_shift_id).first();
+      if (settledShift && settledShift.status === "closed") {
+        return error(
+          "closed_shift_locked",
+          "تسویه مربوط به یک شیفت بسته است و برای حفظ حساب صندوق قابل بازگشت نیست.",
+          409
+        );
+      }
     }
 
     const occupied = await env.DB.prepare(
@@ -1473,6 +1510,19 @@ async function route(request, env) {
        WHERE o.id=?`
     ).bind(orderId).first();
     if (!current) return error("not_found", "سفارش پیدا نشد.", 404);
+
+    if (current.settled_shift_id) {
+      const settledShift = await env.DB.prepare(
+        "SELECT status FROM cash_shifts WHERE id=?"
+      ).bind(current.settled_shift_id).first();
+      if (settledShift && settledShift.status === "closed") {
+        return error(
+          "delete_closed_shift_locked",
+          "سفارش متعلق به شیفت بسته است و برای حفظ سابقه صندوق قابل حذف کامل نیست.",
+          409
+        );
+      }
+    }
 
     const itemIds = await env.DB.prepare(
       "SELECT id FROM order_items WHERE order_id=?"
@@ -1632,16 +1682,46 @@ async function route(request, env) {
   const customerPayment = path.match(/^\/api\/customers\/(\d+)\/payment$/);
   if (customerPayment && method === "POST") {
     const customerId = Number(customerPayment[1]);
-    const customer = await env.DB.prepare("SELECT id FROM customers WHERE id=? AND active=1").bind(customerId).first();
+    const customer = await env.DB.prepare(
+      "SELECT id FROM customers WHERE id=? AND active=1"
+    ).bind(customerId).first();
     if (!customer) return error("not_found", "Customer not found.", 404);
+
+    const shift = await getOpenShift(env, user.id);
+    if (!shift) {
+      return error("shift_required", "برای دریافت بدهی مشتری ابتدا شیفت خود را باز کنید.", 409);
+    }
+
     const data = await bodyJson(request);
     const amount = intAmount(data.amount);
-    if (!amount || amount <= 0) return error("invalid_amount", "Amount must be greater than zero.");
+    const paymentMethod = ["cash","card","transfer"].includes(
+      String(data.payment_method || "cash")
+    ) ? String(data.payment_method || "cash") : "cash";
+
+    if (!amount || amount <= 0) {
+      return error("invalid_amount", "Amount must be greater than zero.");
+    }
+
     await env.DB.prepare(
-      "INSERT INTO customer_ledger (customer_id,entry_type,amount,note,created_by) VALUES (?,?,?,?,?)",
-    ).bind(customerId, "payment", -amount, data.note ? String(data.note) : "پرداخت بدهی", user.id).run();
-    await audit(env, user.id, "customer_payment", "customer", customerId, { amount });
-    return json({ ok: true });
+      `INSERT INTO customer_ledger
+       (customer_id,entry_type,amount,note,created_by,shift_id,payment_method)
+       VALUES (?,?,?,?,?,?,?)`
+    ).bind(
+      customerId,
+      "payment",
+      -amount,
+      data.note ? String(data.note) : "پرداخت بدهی",
+      user.id,
+      shift.id,
+      paymentMethod
+    ).run();
+
+    await audit(env, user.id, "customer_payment", "customer", customerId, {
+      amount,
+      payment_method: paymentMethod,
+      shift_id: Number(shift.id),
+    });
+    return json({ ok: true, shift_id: Number(shift.id), payment_method: paymentMethod });
   }
 
   if (path === "/api/expenses" && method === "GET") {
