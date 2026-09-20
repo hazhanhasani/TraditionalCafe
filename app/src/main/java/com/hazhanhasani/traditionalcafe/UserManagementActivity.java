@@ -446,7 +446,8 @@ public class UserManagementActivity extends Activity {
         String[] keys = new String[]{
                 "view_all_orders","manage_catalog","manage_expenses","view_reports",
                 "reverse_settlement","apply_discount","view_all_shifts","manage_inventory",
-                "manage_customer_limits"
+                "manage_customer_limits",
+                "adjust_customer_ledger"
         };
         String[] labels = new String[]{
                 "مدیریت سفارش‌های همه کاربران",
@@ -457,7 +458,8 @@ public class UserManagementActivity extends Activity {
                 "ثبت تخفیف روی سفارش",
                 "مشاهده شیفت همه کاربران",
                 "مدیریت انبار و موجودی",
-                "تنظیم سقف اعتبار و مهلت پرداخت مشتریان"
+                "تنظیم سقف اعتبار و مهلت پرداخت مشتریان",
+                "اصلاح دستی مانده حساب مشتریان"
         };
 
         List<CheckBox> checks = new ArrayList<>();
