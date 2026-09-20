@@ -212,9 +212,46 @@ public class CatalogActivity extends Activity {
             row.addView(badge);
 
             card.addView(row);
-            card.setOnClickListener(v -> showEditDialog(item));
+
+            if ("hookah".equals(type) && PermissionStore.has(this, "manage_inventory")) {
+                TextView recipeHint = text(
+                        "فرمول مصرف مواد اولیه • برای مدیریت روی کارت بزنید",
+                        10, turquoise, true
+                );
+                recipeHint.setGravity(Gravity.RIGHT);
+                recipeHint.setPadding(0, dp(8), 0, 0);
+                card.addView(recipeHint);
+
+                card.setOnClickListener(v -> showHookahActions(item));
+            } else {
+                card.setOnClickListener(v -> showEditDialog(item));
+            }
+
             content.addView(card);
         }
+    }
+
+    private void showHookahActions(JSONObject item) {
+        String[] options = new String[]{"ویرایش مشخصات", "فرمول مصرف مواد اولیه"};
+
+        new AlertDialog.Builder(this)
+                .setTitle(item.optString("name", "قلیان"))
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        showEditDialog(item);
+                    } else {
+                        android.content.Intent intent = new android.content.Intent(
+                                this,
+                                RecipeActivity.class
+                        );
+                        intent.putExtra("catalog_id", item.optLong("id"));
+                        intent.putExtra("catalog_type", "hookah");
+                        intent.putExtra("catalog_name", item.optString("name", "قلیان"));
+                        startActivity(intent);
+                    }
+                })
+                .setNegativeButton("بستن", null)
+                .show();
     }
 
     private void showEditDialog(JSONObject existing) {
@@ -226,7 +263,12 @@ public class CatalogActivity extends Activity {
 
         EditText name = field("نام", false);
         EditText price = field("قیمت فروش (تومان)", true);
-        EditText cost = field("هزینه تمام‌شده (تومان)", true);
+        EditText cost = field(
+                "hookah".equals(type)
+                        ? "هزینه تمام‌شده دستی؛ با فرمول خودکار محاسبه می‌شود"
+                        : "هزینه تمام‌شده (تومان)",
+                true
+        );
         CheckBox active = new CheckBox(this);
         active.setText("فعال باشد");
         active.setTextColor(ink);
