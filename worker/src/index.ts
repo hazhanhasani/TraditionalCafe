@@ -1,4 +1,4 @@
-// full-debug-trigger: backend-functional-test-v2
+// full-debug-trigger: order-management-e2e
 // setup-key-sync-trigger: configured
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
