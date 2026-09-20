@@ -265,17 +265,17 @@ public class OrderActivity extends Activity {
         totalView.setPadding(0, 0, 0, dp(10));
         box.addView(totalView);
 
-        EditText discount = numberField("تخفیف", "0");
-        EditText cash = numberField("نقدی", "0");
-        EditText card = numberField("کارت / کارتخوان", "0");
-        EditText transfer = numberField("کارت‌به‌کارت", "0");
-        EditText credit = numberField("نسیه", "0");
+        EditText discount = numberField("مبلغ تخفیف", "0");
+        EditText cash = numberField("مبلغ نقدی", "0");
+        EditText card = numberField("مبلغ کارت / کارتخوان", "0");
+        EditText transfer = numberField("مبلغ کارت‌به‌کارت", "0");
+        EditText credit = numberField("مبلغ نسیه", "0");
 
-        box.addView(discount);
-        box.addView(cash);
-        box.addView(card);
-        box.addView(transfer);
-        box.addView(credit);
+        addLabeledNumberField(box, "تخفیف", "از مبلغ کل کم می‌شود", discount);
+        addLabeledNumberField(box, "نقدی", "مبلغی که نقد دریافت شده", cash);
+        addLabeledNumberField(box, "کارت / کارتخوان", "پرداخت با دستگاه کارتخوان", card);
+        addLabeledNumberField(box, "کارت‌به‌کارت", "واریز مستقیم به کارت", transfer);
+        addLabeledNumberField(box, "نسیه / حساب دفتری", "برای این مبلغ باید مشتری انتخاب شود", credit);
 
         List<Long> customerIds = new ArrayList<>();
         List<String> customerNames = new ArrayList<>();
@@ -291,12 +291,26 @@ public class OrderActivity extends Activity {
             }
         }
 
+        TextView customerLabel = text("مشتری نسیه", 13, ink, true);
+        customerLabel.setGravity(Gravity.RIGHT);
+        customerLabel.setPadding(dp(4), dp(8), dp(4), dp(6));
+        box.addView(customerLabel);
+
+        TextView customerHint = text(
+                "فقط وقتی مبلغ نسیه بیشتر از صفر است، مشتری را انتخاب کن.",
+                10, muted, false
+        );
+        customerHint.setGravity(Gravity.RIGHT);
+        customerHint.setPadding(dp(4), 0, dp(4), dp(6));
+        box.addView(customerHint);
+
         Spinner customerSpinner = new Spinner(this);
         customerSpinner.setAdapter(new ArrayAdapter<>(
                 this, android.R.layout.simple_spinner_dropdown_item, customerNames
         ));
+        customerSpinner.setBackground(rounded(Color.rgb(247,243,235), 14));
         box.addView(customerSpinner, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(54)
         ));
 
         new AlertDialog.Builder(this)
@@ -359,10 +373,31 @@ public class OrderActivity extends Activity {
         return p;
     }
 
+    private void addLabeledNumberField(
+            LinearLayout parent,
+            String labelText,
+            String helperText,
+            EditText input
+    ) {
+        TextView label = text(labelText, 13, ink, true);
+        label.setGravity(Gravity.RIGHT);
+        label.setPadding(dp(4), dp(7), dp(4), dp(4));
+        parent.addView(label);
+
+        TextView helper = text(helperText, 10, muted, false);
+        helper.setGravity(Gravity.RIGHT);
+        helper.setPadding(dp(4), 0, dp(4), dp(5));
+        parent.addView(helper);
+
+        parent.addView(input);
+    }
+
     private EditText numberField(String hint, String value) {
         EditText e = field(hint, false);
         e.setInputType(InputType.TYPE_CLASS_NUMBER);
         e.setText(value);
+        e.setSelectAllOnFocus(true);
+        e.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
         return e;
     }
 
