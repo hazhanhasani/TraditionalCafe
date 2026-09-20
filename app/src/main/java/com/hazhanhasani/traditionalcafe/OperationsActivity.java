@@ -133,9 +133,14 @@ public class OperationsActivity extends Activity {
         loading.setVisibility(View.VISIBLE);
         content.removeAllViews();
 
-        if ("staff".equals(role) && ("reports".equals(module) || "expenses".equals(module))) {
+        if ("reports".equals(module) && !PermissionStore.has(this, "view_reports")) {
             loading.setVisibility(View.GONE);
-            showAccessCard("این بخش برای حساب شاگرد نمایش داده نمی‌شود.");
+            showAccessCard("مجوز مشاهده گزارش‌ها برای این حساب فعال نیست.");
+            return;
+        }
+        if ("expenses".equals(module) && !PermissionStore.has(this, "manage_expenses")) {
+            loading.setVisibility(View.GONE);
+            showAccessCard("مجوز مدیریت هزینه‌ها برای این حساب فعال نیست.");
             return;
         }
 
