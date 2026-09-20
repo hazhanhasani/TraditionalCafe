@@ -1,0 +1,50 @@
+name: Backend Self Test
+
+on:
+  workflow_run:
+    workflows:
+      - "Deploy Cloudflare Worker"
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      API_BASE: https://traditionalcafe.hazhanhasani4268-0f9.workers.dev
+      CAFE_SETUP_KEY: ${{ secrets.CAFE_SETUP_KEY }}
+
+    steps:
+      - name: Check health and D1
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 4 --retry-delay 2             "$API_BASE/api/health" | tee health.json
+          grep -q '"ok":true' health.json
+          grep -q '"database":"ready"' health.json
+
+      - name: Check setup status
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 4 --retry-delay 2             "$API_BASE/api/setup/status" | tee setup-status.json
+          grep -q '"ok":true' setup-status.json
+
+      - name: Verify setup key and setup endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${CAFE_SETUP_KEY:-}"
+          HTTP_CODE="$(curl --silent --show-error             --output setup-probe.json             --write-out '%{http_code}'             -X POST "$API_BASE/api/setup/user"             -H 'Content-Type: application/json'             -H "X-Setup-Key: $CAFE_SETUP_KEY"             --data '{"username":"x","name":"Probe User","password":"12345678","role":"staff"}')"
+
+          cat setup-probe.json
+
+          test "$HTTP_CODE" = "400"
+          grep -q '"error":"invalid_username"' setup-probe.json
+          echo "Backend setup endpoint and CAFE_SETUP_KEY are valid."
