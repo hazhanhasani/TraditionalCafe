@@ -69,6 +69,7 @@ public class AuthActivity extends Activity {
         }
 
         setContentView(buildUi());
+        detectSetupState();
     }
 
     private View buildUi() {
@@ -123,7 +124,7 @@ public class AuthActivity extends Activity {
         setupFields.setVisibility(View.GONE);
 
         displayNameInput = field("نام نمایشی", false);
-        setupKeyInput = field("کلید راه‌اندازی", true);
+        setupKeyInput = field("کلید راه‌اندازی CAFE_SETUP_KEY", true);
         setupFields.addView(displayNameInput);
         setupFields.addView(setupKeyInput);
 
@@ -238,6 +239,55 @@ public class AuthActivity extends Activity {
         }
     }
 
+    private void detectSetupState() {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(API_BASE + "/api/setup/status").openConnection();
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(8000);
+                connection.setRequestMethod("GET");
+                connection.setRequestProperty("Accept", "application/json");
+
+                int status = connection.getResponseCode();
+                if (status < 200 || status >= 300) return;
+
+                BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
+                StringBuilder body = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) body.append(line);
+                reader.close();
+
+                JSONObject response = new JSONObject(body.toString());
+                boolean configured = response.optBoolean("configured", false);
+
+                if (!configured) {
+                    runOnUiThread(() -> {
+                        if (!setupMode) toggleMode();
+                        modeButton.setText("اولین حساب هنوز ساخته نشده است");
+                        Toast.makeText(
+                                this,
+                                "برای اولین ورود، یک‌بار حساب اولیه را با CAFE_SETUP_KEY بساز.",
+                                Toast.LENGTH_LONG
+                        ).show();
+                    });
+                }
+            } catch (Exception ignored) {
+                // Login still remains available when the status check cannot be completed.
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }).start();
+    }
+
+    private String errorMessage(Exception error, String fallback) {
+        String message = error.getMessage();
+        if (message == null || message.trim().isEmpty() || "Request failed".equals(message)) {
+            return fallback;
+        }
+        return message;
+    }
+
     private void login(String username, String password) {
         new Thread(() -> {
             try {
@@ -247,7 +297,7 @@ public class AuthActivity extends Activity {
                 JSONObject response = post("/api/auth/login", body, null);
                 handleAuthResponse(response);
             } catch (Exception e) {
-                showError("ورود انجام نشد. اتصال اینترنت یا اطلاعات ورود را بررسی کنید.");
+                showError(errorMessage(e, "ورود انجام نشد. اتصال اینترنت یا اطلاعات ورود را بررسی کنید."));
             }
         }).start();
     }
@@ -263,7 +313,7 @@ public class AuthActivity extends Activity {
                 JSONObject response = post("/api/setup/user", body, setupKey);
                 handleAuthResponse(response);
             } catch (Exception e) {
-                showError("ساخت کاربر انجام نشد. کلید راه‌اندازی و اتصال اینترنت را بررسی کنید.");
+                showError(errorMessage(e, "ساخت کاربر انجام نشد. کلید راه‌اندازی و اتصال اینترنت را بررسی کنید."));
             }
         }).start();
     }
