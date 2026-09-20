@@ -142,6 +142,17 @@ public class OrderActivity extends Activity {
         totalView.setGravity(Gravity.RIGHT);
         totalView.setPadding(0, dp(6), 0, 0);
         summary.addView(totalView);
+
+        String openedAt = currentOrder.optString("opened_at", "");
+        if (!openedAt.isEmpty()) {
+            TextView opened = text(
+                    "شروع سفارش: " + JalaliDateTime.formatUtcCompact(openedAt),
+                    11, muted, false
+            );
+            opened.setGravity(Gravity.RIGHT);
+            opened.setPadding(0, dp(7), 0, 0);
+            summary.addView(opened);
+        }
         content.addView(summary);
 
         LinearLayout buttons = new LinearLayout(this);
@@ -186,7 +197,10 @@ public class OrderActivity extends Activity {
                 c.addView(n);
                 long qty = item.optLong("qty", 1);
                 long unit = item.optLong("unit_price", 0);
-                TextView meta = text(qty + " × " + money(unit), 12, muted, false);
+                String itemAt = item.optString("created_at", "");
+                String metaText = JalaliDateTime.fa(String.valueOf(qty)) + " × " + money(unit) +
+                        (itemAt.isEmpty() ? "" : "\n" + JalaliDateTime.formatUtcCompact(itemAt));
+                TextView meta = text(metaText, 12, muted, false);
                 meta.setGravity(Gravity.RIGHT);
                 meta.setPadding(0, dp(5), 0, 0);
                 c.addView(meta);
@@ -569,7 +583,7 @@ public class OrderActivity extends Activity {
     }
 
     private String money(long value) {
-        return String.format(Locale.US, "%,d تومان", value);
+        return JalaliDateTime.fa(String.format(Locale.US, "%,d تومان", value));
     }
 
     private long parseLong(String value) {
