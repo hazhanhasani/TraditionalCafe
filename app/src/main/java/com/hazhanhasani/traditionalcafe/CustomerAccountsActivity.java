@@ -123,7 +123,9 @@ public class CustomerAccountsActivity extends Activity {
         filter.setAdapter(new ArrayAdapter<>(
                 this,
                 android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"همه مشتریان", "بدهکاران", "بدهی معوق", "نزدیک سقف اعتبار", "بدون بدهی"}
+                PermissionStore.has(this, "manage_customer_limits")
+                        ? new String[]{"همه مشتریان", "بدهکاران", "بدهی معوق", "نزدیک سقف اعتبار", "بدون بدهی", "غیرفعال‌ها"}
+                        : new String[]{"همه مشتریان", "بدهکاران", "بدهی معوق", "نزدیک سقف اعتبار", "بدون بدهی"}
         ));
         filter.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override
@@ -167,7 +169,12 @@ public class CustomerAccountsActivity extends Activity {
         loading.setVisibility(View.VISIBLE);
         new Thread(() -> {
             try {
-                JSONObject response = ApiClient.get(this, "/api/customers");
+                JSONObject response = ApiClient.get(
+                        this,
+                        PermissionStore.has(this, "manage_customer_limits")
+                                ? "/api/customers?all=1"
+                                : "/api/customers"
+                );
                 customers = response.optJSONArray("customers");
                 if (customers == null) customers = new JSONArray();
                 summary = response.optJSONObject("summary");
@@ -210,6 +217,8 @@ public class CustomerAccountsActivity extends Activity {
             if (mode == 2 && overdue <= 0) continue;
             if (mode == 3 && !nearLimit) continue;
             if (mode == 4 && balance != 0) continue;
+            if (mode == 5 && customer.optInt("active", 1) == 1) continue;
+            if (mode != 5 && customer.optInt("active", 1) == 0) continue;
 
             shown++;
             content.addView(customerCard(customer));
@@ -241,9 +250,23 @@ public class CustomerAccountsActivity extends Activity {
     private View customerCard(JSONObject customer) {
         LinearLayout card = card();
 
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView name = text(customer.optString("name", "مشتری"), 16, ink, true);
         name.setGravity(Gravity.RIGHT);
-        card.addView(name);
+        titleRow.addView(name, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+        ));
+
+        if (customer.optInt("active", 1) == 0) {
+            TextView inactive = text("غیرفعال", 10, red, true);
+            inactive.setPadding(dp(8), dp(5), dp(8), dp(5));
+            inactive.setBackground(rounded(Color.rgb(250,235,232), 12));
+            titleRow.addView(inactive);
+        }
+
+        card.addView(titleRow);
 
         String phone = customer.optString("phone", "");
         if (!phone.isEmpty()) {
