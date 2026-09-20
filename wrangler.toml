@@ -6,3 +6,7 @@ compatibility_date = "2026-09-20"
 binding = "DB"
 database_name = "traditionalcafe-db"
 database_id = "b8ed6f48-a066-4e90-bc50-f1f2b4123f6c"
+
+[triggers]
+# Cloudflare Cron runs in UTC. 20:35 UTC is 00:05 in Iran.
+crons = ["35 20 * * *"]
