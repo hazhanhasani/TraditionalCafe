@@ -28,6 +28,9 @@
             android:name=".ShiftActivity"
             android:exported="false" />
         <activity
+            android:name=".UserManagementActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity
