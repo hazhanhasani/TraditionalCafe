@@ -1,3 +1,4 @@
+// deploy-trigger: GitHub Actions Cloudflare deployment enabled
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
