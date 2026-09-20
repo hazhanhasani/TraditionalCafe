@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS service_catalog (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  price INTEGER NOT NULL DEFAULT 0 CHECK (price >= 0),
+  cost INTEGER NOT NULL DEFAULT 0 CHECK (cost >= 0),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_catalog_active_name
+ON service_catalog(active, name);

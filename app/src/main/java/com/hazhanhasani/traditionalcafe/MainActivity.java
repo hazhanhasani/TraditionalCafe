@@ -560,6 +560,7 @@ public class MainActivity extends Activity {
 
         grid.addView(actionTile("میزها", "سفارش و وضعیت میز", R.drawable.ic_table, turquoise, softTeal));
         grid.addView(actionTile("ثبت قلیان", "ثبت سریع سفارش", R.drawable.ic_hookah, brown, softGold));
+        grid.addView(actionTile("تعریف قلیان و خدمات", "نام، قیمت فروش و هزینه", R.drawable.ic_hookah, turquoise, softTeal));
         grid.addView(actionTile("حساب دفتری", "بدهی و پرداخت مشتری", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
         grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
         grid.addView(actionTile("تسویه", "نقد، کارت و ترکیبی", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
@@ -701,6 +702,8 @@ public class MainActivity extends Activity {
             openModule("tables");
         } else if ("ثبت قلیان".equals(title)) {
             openModule("hookah");
+        } else if ("تعریف قلیان و خدمات".equals(title)) {
+            startActivity(new Intent(this, CatalogActivity.class));
         } else if ("حساب دفتری".equals(title)) {
             openModule("customers");
         } else if ("ثبت هزینه".equals(title)) {

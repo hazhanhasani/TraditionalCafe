@@ -476,6 +476,106 @@ async function route(request, env) {
     }
   }
 
+
+  if (path === "/api/catalog" && method === "GET") {
+    const type = String(url.searchParams.get("type") || "").toLowerCase();
+    const includeAll = url.searchParams.get("all") === "1";
+    const activeWhere = includeAll ? "" : " WHERE active=1";
+
+    if (type === "hookah") {
+      const result = await env.DB.prepare(
+        "SELECT id, name, price, cost, active, created_at, updated_at FROM hookah_catalog" +
+        activeWhere + " ORDER BY active DESC, name"
+      ).all();
+      return json({ ok: true, type: "hookah", items: result.results || [] });
+    }
+
+    if (type === "service") {
+      const result = await env.DB.prepare(
+        "SELECT id, name, price, cost, active, created_at, updated_at FROM service_catalog" +
+        activeWhere + " ORDER BY active DESC, name"
+      ).all();
+      return json({ ok: true, type: "service", items: result.results || [] });
+    }
+
+    const hookahs = await env.DB.prepare(
+      "SELECT id, name, price, cost, active, created_at, updated_at FROM hookah_catalog" +
+      activeWhere + " ORDER BY active DESC, name"
+    ).all();
+    const services = await env.DB.prepare(
+      "SELECT id, name, price, cost, active, created_at, updated_at FROM service_catalog" +
+      activeWhere + " ORDER BY active DESC, name"
+    ).all();
+
+    return json({
+      ok: true,
+      hookahs: hookahs.results || [],
+      services: services.results || [],
+    });
+  }
+
+  if (path === "/api/catalog" && method === "POST") {
+    const data = await bodyJson(request);
+    const type = String(data.type || "").toLowerCase();
+    const name = String(data.name || "").trim();
+    const price = intAmount(data.price);
+    const cost = intAmount(data.cost || 0);
+
+    if (!["hookah","service"].includes(type)) {
+      return error("invalid_type", "نوع باید قلیان یا خدمت باشد.");
+    }
+    if (!name || price === null || cost === null) {
+      return error("invalid_input", "نام، قیمت فروش و هزینه تمام‌شده معتبر وارد کنید.");
+    }
+
+    const tableName = type === "hookah" ? "hookah_catalog" : "service_catalog";
+    try {
+      const result = await env.DB.prepare(
+        `INSERT INTO ${tableName} (name, price, cost, active) VALUES (?,?,?,1)`
+      ).bind(name, price, cost).run();
+
+      const id = Number(result.meta.last_row_id);
+      await audit(env, user.id, "create_catalog_item", type, id, { name, price, cost });
+      return json({ ok: true, id, type, name, price, cost, active: 1 }, 201);
+    } catch (e) {
+      return error("catalog_exists", "موردی با این نام قبلاً تعریف شده است.", 409);
+    }
+  }
+
+  const catalogItem = path.match(/^\/api\/catalog\/(hookah|service)\/(\d+)$/);
+  if (catalogItem && method === "PATCH") {
+    const type = catalogItem[1];
+    const id = Number(catalogItem[2]);
+    const tableName = type === "hookah" ? "hookah_catalog" : "service_catalog";
+    const current = await env.DB.prepare(
+      `SELECT id, name, price, cost, active FROM ${tableName} WHERE id=?`
+    ).bind(id).first();
+    if (!current) return error("not_found", "مورد تعریف‌شده پیدا نشد.", 404);
+
+    const data = await bodyJson(request);
+    const name = data.name === undefined ? current.name : String(data.name).trim();
+    const price = data.price === undefined ? Number(current.price) : intAmount(data.price);
+    const cost = data.cost === undefined ? Number(current.cost) : intAmount(data.cost);
+    const active = data.active === undefined ? Number(current.active) : (data.active ? 1 : 0);
+
+    if (!name || price === null || cost === null) {
+      return error("invalid_input", "اطلاعات واردشده معتبر نیست.");
+    }
+
+    try {
+      await env.DB.prepare(
+        `UPDATE ${tableName}
+         SET name=?, price=?, cost=?, active=?, updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
+      ).bind(name, price, cost, active, id).run();
+
+      await audit(env, user.id, "update_catalog_item", type, id, { name, price, cost, active });
+      return json({ ok: true, id, type, name, price, cost, active });
+    } catch (e) {
+      return error("catalog_exists", "موردی با این نام قبلاً تعریف شده است.", 409);
+    }
+  }
+
   const orderItems = path.match(/^\/api\/orders\/(\d+)\/items$/);
   if (orderItems && method === "POST") {
     const orderId = Number(orderItems[1]);
