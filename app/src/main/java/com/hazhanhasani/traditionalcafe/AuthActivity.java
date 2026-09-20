@@ -407,6 +407,11 @@ public class AuthActivity extends Activity {
                 .putString("role", user.optString("role", "staff"))
                 .apply();
 
+        JSONObject permissions = response.optJSONObject("permissions");
+        if (permissions != null) {
+            PermissionStore.save(this, permissions);
+        }
+
         runOnUiThread(this::openApp);
     }
 
