@@ -19,7 +19,8 @@ const ROLE_PERMISSION_KEYS = [
   "reverse_settlement",
   "apply_discount",
   "view_all_shifts",
-  "manage_inventory"
+  "manage_inventory",
+  "manage_customer_limits"
 ];
 
 function json(body, status = 200) {
@@ -293,6 +294,79 @@ async function audit(env, userId, action, entityType = null, entityId = null, de
   } catch {
     // Audit logging must never make a business action fail.
   }
+}
+
+function parseUtcMillis(value) {
+  if (!value) return NaN;
+  const raw = String(value).trim();
+  if (!raw) return NaN;
+  const normalized = /(?:Z|[+-]\d\d:?\d\d)$/.test(raw)
+    ? raw
+    : raw.replace(" ", "T") + "Z";
+  return Date.parse(normalized);
+}
+
+function addDaysIso(value, days) {
+  const start = parseUtcMillis(value);
+  if (!Number.isFinite(start) || !days || days <= 0) return null;
+  return new Date(start + Number(days) * 86400000).toISOString();
+}
+
+function buildCustomerAccountSnapshot(entries, dueDays) {
+  const queue = [];
+  let balance = 0;
+
+  for (const entry of entries || []) {
+    const amount = Number(entry.amount || 0);
+    balance += amount;
+
+    if (amount > 0) {
+      queue.push({
+        remaining: amount,
+        created_at: entry.created_at || null,
+        due_at: entry.due_at || addDaysIso(entry.created_at, dueDays),
+      });
+      continue;
+    }
+
+    if (amount < 0) {
+      let credit = Math.abs(amount);
+      while (credit > 0 && queue.length > 0) {
+        const head = queue[0];
+        const used = Math.min(credit, head.remaining);
+        head.remaining -= used;
+        credit -= used;
+        if (head.remaining <= 0) queue.shift();
+      }
+    }
+  }
+
+  const now = Date.now();
+  let overdueAmount = 0;
+  let oldestUnpaidAt = null;
+  let oldestDueAt = null;
+  let maxDaysOverdue = 0;
+
+  for (const debt of queue) {
+    if (!oldestUnpaidAt) oldestUnpaidAt = debt.created_at || null;
+    const dueMs = parseUtcMillis(debt.due_at);
+    if (Number.isFinite(dueMs) && dueMs < now) {
+      overdueAmount += Number(debt.remaining || 0);
+      if (!oldestDueAt) oldestDueAt = debt.due_at;
+      maxDaysOverdue = Math.max(
+        maxDaysOverdue,
+        Math.floor((now - dueMs) / 86400000)
+      );
+    }
+  }
+
+  return {
+    balance,
+    overdue_amount: overdueAmount,
+    oldest_unpaid_at: oldestUnpaidAt,
+    oldest_due_at: oldestDueAt,
+    days_overdue: maxDaysOverdue,
+  };
 }
 
 async function getOpenShift(env, userId) {
@@ -2386,6 +2460,7 @@ async function route(request, env) {
 
     let paid = 0;
     const normalized = [];
+    const creditPending = new Map();
     for (const p of payments) {
       const methodName = String(p.method || "");
       const amount = intAmount(p.amount);
@@ -2393,13 +2468,61 @@ async function route(request, env) {
         return error("invalid_payment", "Invalid payment item.");
       }
       const customerId = p.customer_id ? Number(p.customer_id) : null;
-      if (methodName === "credit" && !customerId) return error("customer_required", "Credit payment requires a customer.");
-      if (customerId) {
-        const customer = await env.DB.prepare("SELECT id FROM customers WHERE id=? AND active=1").bind(customerId).first();
-        if (!customer) return error("customer_not_found", "Customer not found.", 404);
+      if (methodName === "credit" && !customerId) {
+        return error("customer_required", "برای ثبت نسیه باید مشتری انتخاب شود.");
       }
+
+      let dueAt = null;
+      if (customerId) {
+        const customer = await env.DB.prepare(
+          `SELECT c.id, c.name, c.credit_limit, c.due_days,
+                  COALESCE(SUM(l.amount),0) AS balance
+           FROM customers c
+           LEFT JOIN customer_ledger l ON l.customer_id=c.id
+           WHERE c.id=? AND c.active=1
+           GROUP BY c.id`
+        ).bind(customerId).first();
+
+        if (!customer) return error("customer_not_found", "مشتری پیدا نشد.", 404);
+
+        if (methodName === "credit") {
+          const previousPending = creditPending.get(customerId) || 0;
+          const currentBalance = Number(customer.balance || 0);
+          const limit = Number(customer.credit_limit || 0);
+          const afterBalance = currentBalance + previousPending + amount;
+
+          if (limit > 0 && afterBalance > limit) {
+            return error(
+              "credit_limit_exceeded",
+              "سقف اعتبار «" + customer.name + "» کافی نیست.",
+              409,
+              {
+                customer_id: customerId,
+                customer_name: customer.name,
+                current_balance: currentBalance,
+                credit_limit: limit,
+                requested_credit: amount,
+                balance_after: afterBalance,
+                remaining_credit: Math.max(0, limit - currentBalance - previousPending),
+              }
+            );
+          }
+
+          creditPending.set(customerId, previousPending + amount);
+          const dueDays = Number(customer.due_days || 0);
+          dueAt = dueDays > 0
+            ? new Date(Date.now() + dueDays * 86400000).toISOString()
+            : null;
+        }
+      }
+
       paid += amount;
-      normalized.push({ method: methodName, amount, customer_id: customerId });
+      normalized.push({
+        method: methodName,
+        amount,
+        customer_id: customerId,
+        due_at: dueAt,
+      });
     }
 
     if (paid !== totals.total) {
@@ -2458,8 +2581,18 @@ async function route(request, env) {
       if (p.method === "credit") {
         statements.push(
           env.DB.prepare(
-            "INSERT INTO customer_ledger (customer_id,order_id,entry_type,amount,note,created_by) VALUES (?,?,?,?,?,?)"
-          ).bind(p.customer_id, orderId, "debt", p.amount, "نسیه سفارش", user.id)
+            `INSERT INTO customer_ledger
+             (customer_id,order_id,entry_type,amount,note,created_by,due_at)
+             VALUES (?,?,?,?,?,?,?)`
+          ).bind(
+            p.customer_id,
+            orderId,
+            "debt",
+            p.amount,
+            "نسیه سفارش #" + orderId,
+            user.id,
+            p.due_at
+          )
         );
       }
     }
@@ -2515,51 +2648,371 @@ async function route(request, env) {
   }
 
   if (path === "/api/customers" && method === "GET") {
-    const result = await env.DB.prepare(
-      `SELECT c.id, c.name, c.phone, c.notes, c.active, c.created_at,
-              COALESCE(SUM(l.amount),0) AS balance
-       FROM customers c
-       LEFT JOIN customer_ledger l ON l.customer_id=c.id
-       WHERE c.active=1
-       GROUP BY c.id
-       ORDER BY c.name`,
+    const canManageLimits = await hasPermission(env, user, "manage_customer_limits");
+    const includeInactive = canManageLimits && url.searchParams.get("all") === "1";
+    const query = String(url.searchParams.get("q") || "").trim().toLocaleLowerCase();
+    const statusFilter = String(url.searchParams.get("status") || "all").toLowerCase();
+
+    const customersResult = await env.DB.prepare(
+      `SELECT id,name,phone,notes,active,credit_limit,due_days,created_at,updated_at
+       FROM customers
+       ${includeInactive ? "" : "WHERE active=1"}
+       ORDER BY name`
     ).all();
-    return json({ ok: true, customers: result.results || [] });
+
+    const ledgerResult = await env.DB.prepare(
+      `SELECT customer_id,amount,entry_type,created_at,due_at
+       FROM customer_ledger
+       ORDER BY customer_id,id`
+    ).all();
+
+    const ledgerByCustomer = new Map();
+    for (const entry of ledgerResult.results || []) {
+      const id = Number(entry.customer_id);
+      if (!ledgerByCustomer.has(id)) ledgerByCustomer.set(id, []);
+      ledgerByCustomer.get(id).push(entry);
+    }
+
+    let totalDebt = 0;
+    let overdueAmount = 0;
+    let debtors = 0;
+    let overdueCustomers = 0;
+    let nearLimitCustomers = 0;
+
+    const customers = [];
+    for (const row of customersResult.results || []) {
+      const id = Number(row.id);
+      const account = buildCustomerAccountSnapshot(
+        ledgerByCustomer.get(id) || [],
+        Number(row.due_days || 0)
+      );
+
+      const limit = Number(row.credit_limit || 0);
+      const balance = Number(account.balance || 0);
+      const remainingCredit = limit > 0 ? Math.max(0, limit - balance) : null;
+      const usedPercent = limit > 0
+        ? Math.min(999, Math.round((Math.max(0, balance) * 100) / limit))
+        : null;
+      const limitReached = limit > 0 && balance >= limit;
+      const nearLimit = limit > 0 && balance > 0 && balance >= Math.floor(limit * 0.8);
+
+      if (balance > 0) {
+        debtors++;
+        totalDebt += balance;
+      }
+      if (account.overdue_amount > 0) {
+        overdueCustomers++;
+        overdueAmount += account.overdue_amount;
+      }
+      if (nearLimit) nearLimitCustomers++;
+
+      const customer = {
+        id,
+        name: row.name,
+        phone: row.phone || "",
+        notes: row.notes || "",
+        active: Number(row.active || 0),
+        credit_limit: limit,
+        due_days: Number(row.due_days || 0),
+        balance,
+        remaining_credit: remainingCredit,
+        credit_used_percent: usedPercent,
+        limit_reached: limitReached,
+        near_limit: nearLimit,
+        overdue_amount: Number(account.overdue_amount || 0),
+        oldest_unpaid_at: account.oldest_unpaid_at,
+        oldest_due_at: account.oldest_due_at,
+        days_overdue: Number(account.days_overdue || 0),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+      };
+
+      if (query) {
+        const haystack = (
+          String(customer.name || "") + " " +
+          String(customer.phone || "") + " " +
+          String(customer.notes || "")
+        ).toLocaleLowerCase();
+        if (!haystack.includes(query)) continue;
+      }
+
+      if (statusFilter === "debt" && balance <= 0) continue;
+      if (statusFilter === "overdue" && customer.overdue_amount <= 0) continue;
+      if (statusFilter === "limit" && !nearLimit) continue;
+      if (statusFilter === "clear" && balance !== 0) continue;
+
+      customers.push(customer);
+    }
+
+    customers.sort((a,b) => {
+      if ((b.overdue_amount > 0) !== (a.overdue_amount > 0)) {
+        return b.overdue_amount > 0 ? 1 : -1;
+      }
+      if (b.balance !== a.balance) return b.balance - a.balance;
+      return String(a.name).localeCompare(String(b.name), "fa");
+    });
+
+    return json({
+      ok: true,
+      customers,
+      summary: {
+        total_customers: customersResult.results?.length || 0,
+        debtors,
+        overdue_customers: overdueCustomers,
+        near_limit_customers: nearLimitCustomers,
+        total_debt: totalDebt,
+        overdue_amount: overdueAmount,
+      },
+    });
   }
 
   if (path === "/api/customers" && method === "POST") {
     const data = await bodyJson(request);
     const name = String(data.name || "").trim();
-    if (!name) return error("invalid_name", "Customer name is required.");
+    const phone = String(data.phone || "").trim().slice(0, 30);
+    const notes = String(data.notes || "").trim().slice(0, 500);
+    const canManageLimits = await hasPermission(env, user, "manage_customer_limits");
+
+    if (name.length < 2 || name.length > 80) {
+      return error("invalid_name", "نام مشتری معتبر نیست.");
+    }
+
+    if (!canManageLimits &&
+        (data.credit_limit !== undefined || data.due_days !== undefined)) {
+      return error("forbidden", "تنظیم سقف اعتبار و موعد فقط برای حساب مجاز است.", 403);
+    }
+
+    const creditLimit = canManageLimits ? intAmount(data.credit_limit || 0) : 0;
+    const dueDays = canManageLimits
+      ? Math.max(0, Math.min(3650, Math.round(Number(data.due_days ?? 30))))
+      : 30;
+
+    if (creditLimit === null || !Number.isFinite(dueDays)) {
+      return error("invalid_credit_settings", "تنظیمات اعتبار مشتری معتبر نیست.");
+    }
+
     const result = await env.DB.prepare(
-      "INSERT INTO customers (name,phone,notes) VALUES (?,?,?)",
-    ).bind(name, data.phone ? String(data.phone) : null, data.notes ? String(data.notes) : null).run();
-    await audit(env, user.id, "create_customer", "customer", Number(result.meta.last_row_id), { name });
-    return json({ ok: true, id: result.meta.last_row_id }, 201);
+      `INSERT INTO customers
+       (name,phone,notes,credit_limit,due_days)
+       VALUES (?,?,?,?,?)`
+    ).bind(
+      name,
+      phone || null,
+      notes || null,
+      creditLimit,
+      dueDays
+    ).run();
+
+    const id = Number(result.meta.last_row_id);
+    await audit(env, user.id, "create_customer", "customer", id, {
+      name,
+      phone,
+      credit_limit: creditLimit,
+      due_days: dueDays,
+    });
+
+    return json({
+      ok: true,
+      id,
+      name,
+      phone,
+      notes,
+      credit_limit: creditLimit,
+      due_days: dueDays,
+    }, 201);
+  }
+
+  const customerItem = path.match(/^\/api\/customers\/(\d+)$/);
+  if (customerItem && method === "PATCH") {
+    const customerId = Number(customerItem[1]);
+    const current = await env.DB.prepare(
+      "SELECT * FROM customers WHERE id=?"
+    ).bind(customerId).first();
+    if (!current) return error("not_found", "مشتری پیدا نشد.", 404);
+
+    const data = await bodyJson(request);
+    const canManageLimits = await hasPermission(env, user, "manage_customer_limits");
+
+    const name = data.name === undefined ? current.name : String(data.name).trim();
+    const phone = data.phone === undefined
+      ? (current.phone || "")
+      : String(data.phone || "").trim().slice(0, 30);
+    const notes = data.notes === undefined
+      ? (current.notes || "")
+      : String(data.notes || "").trim().slice(0, 500);
+
+    let creditLimit = Number(current.credit_limit || 0);
+    let dueDays = Number(current.due_days || 0);
+    let active = Number(current.active || 0);
+
+    if (data.credit_limit !== undefined || data.due_days !== undefined || data.active !== undefined) {
+      if (!canManageLimits) {
+        return error("forbidden", "مجوز تغییر سقف اعتبار، موعد یا وضعیت مشتری فعال نیست.", 403);
+      }
+      if (data.credit_limit !== undefined) {
+        const parsed = intAmount(data.credit_limit);
+        if (parsed === null) return error("invalid_credit_limit", "سقف اعتبار معتبر نیست.");
+        creditLimit = parsed;
+      }
+      if (data.due_days !== undefined) {
+        dueDays = Math.max(0, Math.min(3650, Math.round(Number(data.due_days))));
+        if (!Number.isFinite(dueDays)) return error("invalid_due_days", "مهلت پرداخت معتبر نیست.");
+      }
+      if (data.active !== undefined) active = data.active ? 1 : 0;
+    }
+
+    if (name.length < 2 || name.length > 80) {
+      return error("invalid_name", "نام مشتری معتبر نیست.");
+    }
+
+    const balanceRow = await env.DB.prepare(
+      "SELECT COALESCE(SUM(amount),0) AS balance FROM customer_ledger WHERE customer_id=?"
+    ).bind(customerId).first();
+    const currentBalance = Number(balanceRow?.balance || 0);
+
+    if (active === 0 && currentBalance > 0) {
+      return error(
+        "customer_has_debt",
+        "مشتری بدهکار را نمی‌توان غیرفعال کرد.",
+        409,
+        { balance: currentBalance }
+      );
+    }
+
+    if (creditLimit > 0 && currentBalance > creditLimit) {
+      return error(
+        "credit_limit_below_balance",
+        "سقف اعتبار جدید نمی‌تواند کمتر از بدهی فعلی مشتری باشد.",
+        409,
+        { balance: currentBalance, credit_limit: creditLimit }
+      );
+    }
+
+    await env.DB.prepare(
+      `UPDATE customers
+       SET name=?,phone=?,notes=?,credit_limit=?,due_days=?,active=?,
+           updated_at=CURRENT_TIMESTAMP
+       WHERE id=?`
+    ).bind(
+      name,
+      phone || null,
+      notes || null,
+      creditLimit,
+      dueDays,
+      active,
+      customerId
+    ).run();
+
+    await audit(env, user.id, "update_customer", "customer", customerId, {
+      name,
+      phone,
+      credit_limit: creditLimit,
+      due_days: dueDays,
+      active,
+    });
+
+    return json({
+      ok: true,
+      id: customerId,
+      name,
+      phone,
+      notes,
+      credit_limit: creditLimit,
+      due_days: dueDays,
+      active,
+      balance: currentBalance,
+    });
   }
 
   const customerLedger = path.match(/^\/api\/customers\/(\d+)\/ledger$/);
   if (customerLedger && method === "GET") {
     const customerId = Number(customerLedger[1]);
+    const full = url.searchParams.get("full") === "1";
+    const limit = full ? 5000 : Math.min(
+      500,
+      Math.max(1, Number(url.searchParams.get("limit") || 200))
+    );
+    const beforeId = Math.max(0, Number(url.searchParams.get("before_id") || 0));
+
     const customer = await env.DB.prepare(
-      `SELECT c.*, COALESCE(SUM(l.amount),0) AS balance
-       FROM customers c LEFT JOIN customer_ledger l ON l.customer_id=c.id
-       WHERE c.id=? GROUP BY c.id`,
+      "SELECT * FROM customers WHERE id=?"
     ).bind(customerId).first();
-    if (!customer) return error("not_found", "Customer not found.", 404);
-    const entries = await env.DB.prepare(
-      "SELECT * FROM customer_ledger WHERE customer_id=? ORDER BY id DESC LIMIT 200",
+    if (!customer) return error("not_found", "مشتری پیدا نشد.", 404);
+
+    const allEntries = await env.DB.prepare(
+      `SELECT customer_id,amount,entry_type,created_at,due_at
+       FROM customer_ledger
+       WHERE customer_id=?
+       ORDER BY id`
     ).bind(customerId).all();
-    return json({ ok: true, customer, entries: entries.results || [] });
+
+    const account = buildCustomerAccountSnapshot(
+      allEntries.results || [],
+      Number(customer.due_days || 0)
+    );
+
+    const entrySql =
+      `SELECT l.id,l.customer_id,l.order_id,l.entry_type,l.amount,l.note,
+              l.created_by,l.created_at,l.shift_id,l.payment_method,l.due_at,
+              u.name AS created_by_name,
+              o.total AS order_total,
+              t.name AS table_name
+       FROM customer_ledger l
+       JOIN users u ON u.id=l.created_by
+       LEFT JOIN orders o ON o.id=l.order_id
+       LEFT JOIN cafe_tables t ON t.id=o.table_id
+       WHERE l.customer_id=? ${beforeId > 0 ? "AND l.id<?" : ""}
+       ORDER BY l.id DESC
+       LIMIT ${limit}`;
+
+    const entries = beforeId > 0
+      ? await env.DB.prepare(entrySql).bind(customerId, beforeId).all()
+      : await env.DB.prepare(entrySql).bind(customerId).all();
+
+    const rows = entries.results || [];
+    const nextBeforeId = rows.length === limit
+      ? Number(rows[rows.length - 1].id)
+      : null;
+
+    const limitAmount = Number(customer.credit_limit || 0);
+    const balance = Number(account.balance || 0);
+
+    return json({
+      ok: true,
+      customer: {
+        id: Number(customer.id),
+        name: customer.name,
+        phone: customer.phone || "",
+        notes: customer.notes || "",
+        active: Number(customer.active || 0),
+        credit_limit: limitAmount,
+        due_days: Number(customer.due_days || 0),
+        balance,
+        remaining_credit: limitAmount > 0 ? Math.max(0, limitAmount - balance) : null,
+        overdue_amount: Number(account.overdue_amount || 0),
+        oldest_unpaid_at: account.oldest_unpaid_at,
+        oldest_due_at: account.oldest_due_at,
+        days_overdue: Number(account.days_overdue || 0),
+      },
+      entries: rows,
+      next_before_id: nextBeforeId,
+    });
   }
 
   const customerPayment = path.match(/^\/api\/customers\/(\d+)\/payment$/);
   if (customerPayment && method === "POST") {
     const customerId = Number(customerPayment[1]);
     const customer = await env.DB.prepare(
-      "SELECT id FROM customers WHERE id=? AND active=1"
+      `SELECT c.id,c.name,c.active,COALESCE(SUM(l.amount),0) AS balance
+       FROM customers c
+       LEFT JOIN customer_ledger l ON l.customer_id=c.id
+       WHERE c.id=?
+       GROUP BY c.id`
     ).bind(customerId).first();
-    if (!customer) return error("not_found", "Customer not found.", 404);
+
+    if (!customer || Number(customer.active) !== 1) {
+      return error("not_found", "مشتری فعال پیدا نشد.", 404);
+    }
 
     const shift = await getOpenShift(env, user.id);
     if (!shift) {
@@ -2571,9 +3024,23 @@ async function route(request, env) {
     const paymentMethod = ["cash","card","transfer"].includes(
       String(data.payment_method || "cash")
     ) ? String(data.payment_method || "cash") : "cash";
+    const note = String(data.note || "").trim().slice(0, 300);
 
     if (!amount || amount <= 0) {
-      return error("invalid_amount", "Amount must be greater than zero.");
+      return error("invalid_amount", "مبلغ پرداخت باید بیشتر از صفر باشد.");
+    }
+
+    const currentBalance = Number(customer.balance || 0);
+    if (currentBalance <= 0) {
+      return error("no_debt", "این مشتری بدهی قابل پرداخت ندارد.", 409);
+    }
+    if (amount > currentBalance) {
+      return error(
+        "payment_exceeds_balance",
+        "مبلغ پرداخت نمی‌تواند بیشتر از مانده بدهی باشد.",
+        409,
+        { balance: currentBalance, requested: amount }
+      );
     }
 
     await env.DB.prepare(
@@ -2584,18 +3051,30 @@ async function route(request, env) {
       customerId,
       "payment",
       -amount,
-      data.note ? String(data.note) : "پرداخت بدهی",
+      note || "پرداخت بدهی",
       user.id,
       shift.id,
       paymentMethod
     ).run();
 
+    const balanceAfter = currentBalance - amount;
+
     await audit(env, user.id, "customer_payment", "customer", customerId, {
       amount,
       payment_method: paymentMethod,
       shift_id: Number(shift.id),
+      balance_before: currentBalance,
+      balance_after: balanceAfter,
+      note,
     });
-    return json({ ok: true, shift_id: Number(shift.id), payment_method: paymentMethod });
+
+    return json({
+      ok: true,
+      shift_id: Number(shift.id),
+      payment_method: paymentMethod,
+      balance_before: currentBalance,
+      balance_after: balanceAfter,
+    });
   }
 
   if (path === "/api/expenses" && method === "GET") {

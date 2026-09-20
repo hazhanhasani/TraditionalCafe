@@ -37,6 +37,12 @@
             android:name=".RecipeActivity"
             android:exported="false" />
         <activity
+            android:name=".CustomerAccountsActivity"
+            android:exported="false" />
+        <activity
+            android:name=".CustomerLedgerActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity

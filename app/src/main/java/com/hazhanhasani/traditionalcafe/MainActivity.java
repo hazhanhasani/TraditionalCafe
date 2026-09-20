@@ -842,6 +842,10 @@ public class MainActivity extends Activity {
     }
 
     private void openModule(String module) {
+        if ("customers".equals(module)) {
+            startActivity(new Intent(this, CustomerAccountsActivity.class));
+            return;
+        }
         Intent intent = new Intent(this, OperationsActivity.class);
         intent.putExtra("module", module);
         startActivity(intent);

@@ -744,7 +744,26 @@ public class OrderActivity extends Activity {
                 JSONObject c = customers.optJSONObject(i);
                 if (c == null) continue;
                 customerIds.add(c.optLong("id"));
-                customerNames.add(c.optString("name", "مشتری"));
+
+                long balance = c.optLong("balance", 0L);
+                long limit = c.optLong("credit_limit", 0L);
+                long remaining = c.optLong("remaining_credit", 0L);
+                long overdue = c.optLong("overdue_amount", 0L);
+
+                String label = c.optString("name", "مشتری") +
+                        " • بدهی " + money(balance);
+
+                if (limit > 0) {
+                    label += " • اعتبار آزاد " + money(remaining);
+                } else {
+                    label += " • بدون سقف مشخص";
+                }
+
+                if (overdue > 0) {
+                    label += " • معوق";
+                }
+
+                customerNames.add(label);
             }
         }
 
