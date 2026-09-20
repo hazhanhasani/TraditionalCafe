@@ -1258,8 +1258,8 @@ async function route(request, env) {
   }
 
   if (path === "/api/tables" && method === "POST") {
-    if (!(await hasPermission(env, user, "view_reports"))) {
-      return error("forbidden", "مجوز مشاهده گزارش‌ها فعال نیست.", 403);
+    if (!requireRole(user, ["admin","cashier"])) {
+      return error("forbidden", "فقط مدیر یا صندوق‌دار می‌تواند میز جدید تعریف کند.", 403);
     }
     const data = await bodyJson(request);
     const name = String(data.name || "").trim();
