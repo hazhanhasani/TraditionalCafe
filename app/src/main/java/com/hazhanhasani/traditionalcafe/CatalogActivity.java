@@ -51,6 +51,14 @@ public class CatalogActivity extends Activity {
         getWindow().setNavigationBarColor(bg);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+
+        String role = getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff");
+        if ("staff".equals(role)) {
+            Toast.makeText(this, "تعریف قلیان و خدمات برای حساب شاگرد مجاز نیست.", Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
+
         setContentView(buildScreen());
         reload();
     }
