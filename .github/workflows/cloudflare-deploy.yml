@@ -38,7 +38,7 @@ jobs:
 
       - name: Apply D1 migrations
         if: steps.auth.outputs.ready == 'true'
-        run: npx wrangler@latest d1 migrations apply DB --remote
+        run: npx --yes wrangler@latest d1 migrations apply DB --remote
 
       - name: Sync setup key
         if: steps.auth.outputs.ready == 'true'
@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${CAFE_SETUP_KEY:-}" ]; then
-            printf '%s' "$CAFE_SETUP_KEY" | npx wrangler@latest secret put SETUP_KEY
+            printf '%s' "$CAFE_SETUP_KEY" | npx --yes wrangler@latest secret put SETUP_KEY
           else
             echo "CAFE_SETUP_KEY is not configured yet; initial admin bootstrap will remain locked."
           fi
