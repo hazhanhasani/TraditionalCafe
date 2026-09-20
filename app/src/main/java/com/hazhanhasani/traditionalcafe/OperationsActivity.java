@@ -121,6 +121,7 @@ public class OperationsActivity extends Activity {
             case "expenses": return "هزینه‌ها";
             case "settlement": return "تسویه سفارش";
             case "reports": return "گزارش‌ها";
+            case "my_sales": return "فروش‌های امروز من";
             default: return "میزها";
         }
     }
@@ -129,9 +130,9 @@ public class OperationsActivity extends Activity {
         loading.setVisibility(View.VISIBLE);
         content.removeAllViews();
 
-        if ("reports".equals(module) && "staff".equals(role)) {
+        if ("staff".equals(role) && ("reports".equals(module) || "expenses".equals(module))) {
             loading.setVisibility(View.GONE);
-            showAccessCard("گزارش سود و زیان برای مدیر و صندوق‌دار قابل مشاهده است.");
+            showAccessCard("این بخش برای حساب شاگرد نمایش داده نمی‌شود.");
             return;
         }
 
@@ -149,6 +150,9 @@ public class OperationsActivity extends Activity {
                 } else if ("reports".equals(module)) {
                     JSONObject r = ApiClient.get(this, "/api/reports/summary");
                     runOnUiThread(() -> renderReports(r));
+                } else if ("my_sales".equals(module)) {
+                    JSONObject r = ApiClient.get(this, "/api/my-sales/today");
+                    runOnUiThread(() -> renderMySales(r.optJSONArray("sales")));
                 }
             } catch (Exception e) {
                 runOnUiThread(() -> showError(e.getMessage()));
@@ -178,11 +182,12 @@ public class OperationsActivity extends Activity {
             JSONObject table = tables.optJSONObject(i);
             if (table == null) continue;
             long orderId = table.optLong("order_id", 0L);
+            boolean busy = table.optInt("busy", orderId > 0 ? 1 : 0) == 1;
+            boolean mine = table.optInt("mine", orderId > 0 ? 1 : 0) == 1;
             if ("settlement".equals(module) && orderId <= 0) continue;
             shown++;
 
             String name = table.optString("name", "میز");
-            boolean busy = orderId > 0;
             long total = table.optLong("total", 0L);
 
             LinearLayout card = card();
@@ -198,10 +203,15 @@ public class OperationsActivity extends Activity {
             texts.addView(nameView);
 
             String openedAt = table.optString("opened_at", "");
-            String stateText = busy
-                    ? "سفارش باز • " + money(total) +
-                      (openedAt.isEmpty() ? "" : "\n" + JalaliDateTime.formatUtcCompact(openedAt))
-                    : "آزاد";
+            String stateText;
+            if (busy && "staff".equals(role) && !mine) {
+                stateText = "مشغول • سفارش همکار";
+            } else if (busy) {
+                stateText = "سفارش باز • " + money(total) +
+                        (openedAt.isEmpty() ? "" : "\n" + JalaliDateTime.formatUtcCompact(openedAt));
+            } else {
+                stateText = "آزاد";
+            }
             TextView state = text(
                     stateText,
                     12, busy ? brown : green, false
@@ -220,6 +230,10 @@ public class OperationsActivity extends Activity {
 
             card.addView(row);
             card.setOnClickListener(v -> {
+                if (busy && "staff".equals(role) && !mine) {
+                    Toast.makeText(this, "این میز در اختیار همکار دیگری است.", Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 if (busy) {
                     openOrder(orderId, name, "hookah".equals(module), "settlement".equals(module));
                 } else {
@@ -488,6 +502,72 @@ public class OperationsActivity extends Activity {
                 })
                 .setNegativeButton("لغو", null)
                 .show();
+    }
+
+    private void renderMySales(JSONArray sales) {
+        loading.setVisibility(View.GONE);
+        content.removeAllViews();
+
+        TextView info = text(
+                "فقط فروش‌های امروز که با حساب شما ثبت و تسویه شده‌اند نمایش داده می‌شوند.",
+                12, muted, false
+        );
+        info.setGravity(Gravity.RIGHT);
+        info.setPadding(dp(4), 0, dp(4), dp(12));
+        content.addView(info);
+
+        if (sales == null || sales.length() == 0) {
+            showEmpty("امروز هنوز فروش تسویه‌شده‌ای با حساب شما ثبت نشده است.");
+            return;
+        }
+
+        long totalSales = 0L;
+        long totalCredit = 0L;
+        for (int i = 0; i < sales.length(); i++) {
+            JSONObject sale = sales.optJSONObject(i);
+            if (sale == null) continue;
+            totalSales += sale.optLong("total", 0L);
+            totalCredit += sale.optLong("credit_amount", 0L);
+        }
+
+        LinearLayout summary = card();
+        TextView totalLabel = text("جمع فروش امروز من", 12, muted, false);
+        totalLabel.setGravity(Gravity.RIGHT);
+        summary.addView(totalLabel);
+
+        TextView totalValue = text(money(totalSales), 22, turquoise, true);
+        totalValue.setGravity(Gravity.RIGHT);
+        totalValue.setPadding(0, dp(6), 0, 0);
+        summary.addView(totalValue);
+
+        TextView creditValue = text("نسیه امروز: " + money(totalCredit), 13, brown, true);
+        creditValue.setGravity(Gravity.RIGHT);
+        creditValue.setPadding(0, dp(6), 0, 0);
+        summary.addView(creditValue);
+        content.addView(summary);
+
+        for (int i = 0; i < sales.length(); i++) {
+            JSONObject sale = sales.optJSONObject(i);
+            if (sale == null) continue;
+
+            LinearLayout card = card();
+            TextView title = text(
+                    sale.optString("table_name", "فروش") + " • " + money(sale.optLong("total", 0L)),
+                    15, ink, true
+            );
+            title.setGravity(Gravity.RIGHT);
+            card.addView(title);
+
+            long credit = sale.optLong("credit_amount", 0L);
+            String closedAt = sale.optString("closed_at", "");
+            String detail = (credit > 0 ? "نسیه: " + money(credit) + "\n" : "") +
+                    (closedAt.isEmpty() ? "" : JalaliDateTime.formatUtcCompact(closedAt));
+            TextView detailView = text(detail, 11, credit > 0 ? brown : muted, false);
+            detailView.setGravity(Gravity.RIGHT);
+            detailView.setPadding(0, dp(5), 0, 0);
+            card.addView(detailView);
+            content.addView(card);
+        }
     }
 
     private void renderReports(JSONObject report) {
