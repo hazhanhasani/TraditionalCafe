@@ -9,6 +9,7 @@ const JSON_HEADERS = {
 
 const encoder = new TextEncoder();
 const PASSWORD_KDF_ITERATIONS = 5000;
+const IRAN_TIME_ZONE = "Asia/Tehran";
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -31,6 +32,47 @@ function intAmount(value) {
   if (!Number.isFinite(n)) return null;
   const i = Math.round(n);
   return i >= 0 ? i : null;
+}
+
+function iranTimeParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: IRAN_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const value = {};
+  for (const part of parts) {
+    if (part.type !== "literal") value[part.type] = part.value;
+  }
+  return value;
+}
+
+function iranDateKey(date = new Date()) {
+  const p = iranTimeParts(date);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+function iranIsoLike(date = new Date()) {
+  const p = iranTimeParts(date);
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}+03:30`;
+}
+
+function jalaliNowDisplay(date = new Date()) {
+  return new Intl.DateTimeFormat("fa-IR-u-ca-persian", {
+    timeZone: IRAN_TIME_ZONE,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
 }
 
 function bytesToHex(buffer) {
@@ -137,7 +179,24 @@ async function route(request, env) {
 
   if (path === "/api/health" && method === "GET") {
     const db = await env.DB.prepare("SELECT 1 AS ok").first();
-    return json({ ok: true, service: "TraditionalCafe API", database: db?.ok === 1 ? "ready" : "unknown" });
+    return json({
+      ok: true,
+      service: "TraditionalCafe API",
+      database: db?.ok === 1 ? "ready" : "unknown",
+      timezone: IRAN_TIME_ZONE,
+    });
+  }
+
+  if (path === "/api/time" && method === "GET") {
+    const now = new Date();
+    return json({
+      ok: true,
+      timezone: IRAN_TIME_ZONE,
+      utc: now.toISOString(),
+      iran: iranIsoLike(now),
+      iran_date: iranDateKey(now),
+      jalali: jalaliNowDisplay(now),
+    });
   }
 
   if (path === "/api/setup/status" && method === "GET") {
@@ -355,32 +414,33 @@ async function route(request, env) {
   }
 
   if (path === "/api/dashboard" && method === "GET") {
+    const iranToday = iranDateKey();
     const sales = await env.DB.prepare(
       `SELECT COALESCE(SUM(total),0) AS sales
        FROM orders
        WHERE status='settled'
-       AND date(closed_at,'+3 hours','+30 minutes') = date('now','+3 hours','+30 minutes')`,
-    ).first();
+       AND date(closed_at,'+3 hours','+30 minutes') = date(?)`,
+    ).bind(iranToday).first();
 
     const hookahs = await env.DB.prepare(
       `SELECT COALESCE(SUM(oi.qty),0) AS count
        FROM order_items oi JOIN orders o ON o.id=oi.order_id
        WHERE oi.item_type='hookah'
-       AND date(oi.created_at,'+3 hours','+30 minutes') = date('now','+3 hours','+30 minutes')`,
-    ).first();
+       AND date(oi.created_at,'+3 hours','+30 minutes') = date(?)`,
+    ).bind(iranToday).first();
 
     const expenses = await env.DB.prepare(
       `SELECT COALESCE(SUM(amount),0) AS amount
        FROM expenses
-       WHERE date(created_at,'+3 hours','+30 minutes') = date('now','+3 hours','+30 minutes')`,
-    ).first();
+       WHERE date(created_at,'+3 hours','+30 minutes') = date(?)`,
+    ).bind(iranToday).first();
 
     const gross = await env.DB.prepare(
       `SELECT COALESCE(SUM(oi.qty * (oi.unit_price - oi.unit_cost)),0) AS amount
        FROM order_items oi JOIN orders o ON o.id=oi.order_id
        WHERE o.status='settled'
-       AND date(o.closed_at,'+3 hours','+30 minutes') = date('now','+3 hours','+30 minutes')`,
-    ).first();
+       AND date(o.closed_at,'+3 hours','+30 minutes') = date(?)`,
+    ).bind(iranToday).first();
 
     const debt = await env.DB.prepare(
       "SELECT COALESCE(SUM(amount),0) AS amount FROM customer_ledger",
@@ -389,9 +449,9 @@ async function route(request, env) {
     const payMethods = await env.DB.prepare(
       `SELECT method, COALESCE(SUM(amount),0) AS amount
        FROM payments
-       WHERE date(created_at,'+3 hours','+30 minutes') = date('now','+3 hours','+30 minutes')
+       WHERE date(created_at,'+3 hours','+30 minutes') = date(?)
        GROUP BY method`,
-    ).all();
+    ).bind(iranToday).all();
 
     const expenseAmount = Number(expenses?.amount || 0);
     return json({
@@ -403,6 +463,9 @@ async function route(request, env) {
       net_profit_today: Number(gross?.amount || 0) - expenseAmount,
       total_customer_debt: Number(debt?.amount || 0),
       payment_methods: payMethods.results || [],
+      timezone: IRAN_TIME_ZONE,
+      iran_date: iranToday,
+      jalali_now: jalaliNowDisplay(),
     });
   }
 
@@ -754,20 +817,20 @@ async function route(request, env) {
     const to = url.searchParams.get("to") || "2999-12-31";
 
     const sales = await env.DB.prepare(
-      "SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE status='settled' AND date(closed_at) BETWEEN date(?) AND date(?)",
+      "SELECT COALESCE(SUM(total),0) AS amount, COUNT(*) AS count FROM orders WHERE status='settled' AND date(closed_at,'+3 hours','+30 minutes') BETWEEN date(?) AND date(?)",
     ).bind(from, to).first();
     const expenses = await env.DB.prepare(
-      "SELECT COALESCE(SUM(amount),0) AS amount FROM expenses WHERE date(created_at) BETWEEN date(?) AND date(?)",
+      "SELECT COALESCE(SUM(amount),0) AS amount FROM expenses WHERE date(created_at,'+3 hours','+30 minutes') BETWEEN date(?) AND date(?)",
     ).bind(from, to).first();
     const gross = await env.DB.prepare(
       `SELECT COALESCE(SUM(oi.qty * (oi.unit_price - oi.unit_cost)),0) AS amount
        FROM order_items oi JOIN orders o ON o.id=oi.order_id
-       WHERE o.status='settled' AND date(o.closed_at) BETWEEN date(?) AND date(?)`,
+       WHERE o.status='settled' AND date(o.closed_at,'+3 hours','+30 minutes') BETWEEN date(?) AND date(?)`,
     ).bind(from, to).first();
     const hookahs = await env.DB.prepare(
       `SELECT COALESCE(SUM(oi.qty),0) AS count
        FROM order_items oi JOIN orders o ON o.id=oi.order_id
-       WHERE oi.item_type='hookah' AND date(oi.created_at) BETWEEN date(?) AND date(?)`,
+       WHERE oi.item_type='hookah' AND date(oi.created_at,'+3 hours','+30 minutes') BETWEEN date(?) AND date(?)`,
     ).bind(from, to).first();
 
     return json({
