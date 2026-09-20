@@ -43,6 +43,9 @@
             android:name=".CustomerLedgerActivity"
             android:exported="false" />
         <activity
+            android:name=".DailyReportActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity
