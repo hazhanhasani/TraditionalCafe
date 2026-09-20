@@ -178,6 +178,107 @@ async function hasPermission(env, user, permission) {
   return permissions[permission] === true;
 }
 
+async function refreshCatalogRecipeCost(env, catalogType, catalogId) {
+  if (!["hookah","service"].includes(catalogType)) return 0;
+
+  const recipe = await env.DB.prepare(
+    `SELECT COALESCE(SUM(l.qty_per_unit * i.purchase_price),0) AS recipe_cost,
+            COUNT(*) AS components
+     FROM catalog_inventory_links l
+     JOIN inventory_items i ON i.id=l.inventory_item_id
+     WHERE l.catalog_type=? AND l.catalog_id=?`
+  ).bind(catalogType, catalogId).first();
+
+  const components = Number(recipe?.components || 0);
+  const recipeCost = Number(recipe?.recipe_cost || 0);
+  if (components > 0) {
+    const tableName = catalogType === "hookah" ? "hookah_catalog" : "service_catalog";
+    await env.DB.prepare(
+      `UPDATE ${tableName}
+       SET cost=?, updated_at=CURRENT_TIMESTAMP
+       WHERE id=?`
+    ).bind(recipeCost, catalogId).run();
+  }
+  return recipeCost;
+}
+
+async function refreshRecipesUsingInventory(env, inventoryItemId) {
+  const links = await env.DB.prepare(
+    `SELECT DISTINCT catalog_type, catalog_id
+     FROM catalog_inventory_links
+     WHERE inventory_item_id=?`
+  ).bind(inventoryItemId).all();
+
+  for (const row of links.results || []) {
+    await refreshCatalogRecipeCost(env, row.catalog_type, Number(row.catalog_id));
+  }
+}
+
+async function buildRecipe(env, catalogType, catalogId) {
+  if (!["hookah","service"].includes(catalogType)) return null;
+  const tableName = catalogType === "hookah" ? "hookah_catalog" : "service_catalog";
+
+  const catalog = await env.DB.prepare(
+    `SELECT id,name,price,cost,active FROM ${tableName} WHERE id=?`
+  ).bind(catalogId).first();
+  if (!catalog) return null;
+
+  const rows = await env.DB.prepare(
+    `SELECT l.id AS link_id, l.inventory_item_id, l.qty_per_unit,
+            i.name AS inventory_name, i.unit, i.stock_qty, i.min_stock,
+            i.purchase_price, i.active
+     FROM catalog_inventory_links l
+     JOIN inventory_items i ON i.id=l.inventory_item_id
+     WHERE l.catalog_type=? AND l.catalog_id=?
+     ORDER BY i.name`
+  ).bind(catalogType, catalogId).all();
+
+  let recipeCost = 0;
+  let canMake = null;
+  let lowComponents = 0;
+  const ingredients = [];
+
+  for (const row of rows.results || []) {
+    const qty = Number(row.qty_per_unit || 0);
+    const stock = Number(row.stock_qty || 0);
+    const purchasePrice = Number(row.purchase_price || 0);
+    const componentCost = qty * purchasePrice;
+    const possible = qty > 0 ? Math.floor(stock / qty) : 0;
+
+    recipeCost += componentCost;
+    canMake = canMake === null ? possible : Math.min(canMake, possible);
+    if (stock <= Number(row.min_stock || 0) || possible <= 0) lowComponents++;
+
+    ingredients.push({
+      link_id: Number(row.link_id),
+      inventory_item_id: Number(row.inventory_item_id),
+      inventory_name: row.inventory_name,
+      unit: row.unit,
+      qty_per_unit: qty,
+      stock_qty: stock,
+      min_stock: Number(row.min_stock || 0),
+      purchase_price: purchasePrice,
+      component_cost: componentCost,
+      can_make: possible,
+      active: Number(row.active || 0),
+    });
+  }
+
+  return {
+    catalog_type: catalogType,
+    catalog_id: Number(catalog.id),
+    name: catalog.name,
+    price: Number(catalog.price || 0),
+    stored_cost: Number(catalog.cost || 0),
+    recipe_cost: recipeCost,
+    profit_per_unit: Number(catalog.price || 0) - recipeCost,
+    component_count: ingredients.length,
+    can_make: canMake === null ? 0 : canMake,
+    low_components: lowComponents,
+    ingredients,
+  };
+}
+
 async function audit(env, userId, action, entityType = null, entityId = null, details = null) {
   try {
     await env.DB.prepare(
@@ -1291,6 +1392,10 @@ async function route(request, env) {
          WHERE id=?`
       ).bind(name, unit, minStock, purchasePrice, active, id).run();
 
+      if (purchasePrice !== Number(current.purchase_price || 0)) {
+        await refreshRecipesUsingInventory(env, id);
+      }
+
       await audit(env, user.id, "update_inventory_item", "inventory_item", id, {
         name, unit, min_stock: minStock, purchase_price: purchasePrice, active
       });
@@ -1379,6 +1484,10 @@ async function route(request, env) {
       ).bind(itemId, movementType, delta, unitCost, note || null, user.id),
     ]);
 
+    if (movementType === "purchase") {
+      await refreshRecipesUsingInventory(env, itemId);
+    }
+
     await audit(env, user.id, "inventory_movement", "inventory_item", itemId, {
       type: movementType, qty, delta, unit_cost: unitCost, note
     });
@@ -1388,6 +1497,103 @@ async function route(request, env) {
     ).bind(itemId).first();
 
     return json({ ok: true, item: updated });
+  }
+
+  const recipeMatch = path.match(/^\/api\/recipes\/(hookah|service)\/(\d+)$/);
+  if (recipeMatch && method === "GET") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت فرمول مصرف برای این حساب فعال نیست.", 403);
+    }
+
+    const catalogType = recipeMatch[1];
+    const catalogId = Number(recipeMatch[2]);
+    const recipe = await buildRecipe(env, catalogType, catalogId);
+    if (!recipe) return error("not_found", "آیتم منو پیدا نشد.", 404);
+
+    return json({ ok: true, recipe });
+  }
+
+  if (recipeMatch && method === "PATCH") {
+    if (!(await hasPermission(env, user, "manage_inventory"))) {
+      return error("forbidden", "مجوز مدیریت فرمول مصرف برای این حساب فعال نیست.", 403);
+    }
+
+    const catalogType = recipeMatch[1];
+    const catalogId = Number(recipeMatch[2]);
+    const tableName = catalogType === "hookah" ? "hookah_catalog" : "service_catalog";
+    const catalog = await env.DB.prepare(
+      `SELECT id,name FROM ${tableName} WHERE id=?`
+    ).bind(catalogId).first();
+    if (!catalog) return error("not_found", "آیتم منو پیدا نشد.", 404);
+
+    const data = await bodyJson(request);
+    const rawIngredients = Array.isArray(data.ingredients) ? data.ingredients : [];
+    if (rawIngredients.length > 30) {
+      return error("too_many_ingredients", "تعداد مواد اولیه فرمول بیش از حد مجاز است.");
+    }
+
+    const seen = new Set();
+    const ingredients = [];
+    for (const raw of rawIngredients) {
+      const inventoryItemId = Number(raw.inventory_item_id || 0);
+      const qtyPerUnit = intAmount(raw.qty_per_unit);
+      if (!inventoryItemId || !qtyPerUnit || qtyPerUnit <= 0 || seen.has(inventoryItemId)) {
+        return error("invalid_recipe", "مواد اولیه یا مقدار مصرف فرمول معتبر نیست.");
+      }
+
+      const inventory = await env.DB.prepare(
+        "SELECT id,name,active FROM inventory_items WHERE id=?"
+      ).bind(inventoryItemId).first();
+      if (!inventory || Number(inventory.active) !== 1) {
+        return error("inventory_item_not_found", "یکی از مواد اولیه فعال نیست یا پیدا نشد.", 404);
+      }
+
+      seen.add(inventoryItemId);
+      ingredients.push({ inventory_item_id: inventoryItemId, qty_per_unit: qtyPerUnit });
+    }
+
+    const statements = [
+      env.DB.prepare(
+        "DELETE FROM catalog_inventory_links WHERE catalog_type=? AND catalog_id=?"
+      ).bind(catalogType, catalogId),
+    ];
+
+    for (const ingredient of ingredients) {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO catalog_inventory_links
+           (catalog_type,catalog_id,inventory_item_id,qty_per_unit)
+           VALUES (?,?,?,?)`
+        ).bind(
+          catalogType,
+          catalogId,
+          ingredient.inventory_item_id,
+          ingredient.qty_per_unit
+        )
+      );
+    }
+
+    await env.DB.batch(statements);
+
+    let recipeCost = 0;
+    if (ingredients.length > 0) {
+      recipeCost = await refreshCatalogRecipeCost(env, catalogType, catalogId);
+    } else {
+      await env.DB.prepare(
+        `UPDATE ${tableName} SET cost=0, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+      ).bind(catalogId).run();
+    }
+
+    await audit(env, user.id, "update_recipe", catalogType, catalogId, {
+      ingredient_count: ingredients.length,
+      recipe_cost: recipeCost,
+      ingredients,
+    });
+
+    return json({
+      ok: true,
+      recipe: await buildRecipe(env, catalogType, catalogId),
+    });
   }
 
   if (path === "/api/inventory-links" && method === "GET") {
@@ -1450,14 +1656,17 @@ async function route(request, env) {
       ).bind(catalogType, catalogId, inventoryItemId, qtyPerUnit).run();
 
       const id = Number(result.meta.last_row_id);
+      const recipeCost = await refreshCatalogRecipeCost(env, catalogType, catalogId);
+
       await audit(env, user.id, "create_inventory_link", "inventory_link", id, {
         catalog_type: catalogType,
         catalog_id: catalogId,
         inventory_item_id: inventoryItemId,
         qty_per_unit: qtyPerUnit,
+        recipe_cost: recipeCost,
       });
 
-      return json({ ok: true, id }, 201);
+      return json({ ok: true, id, recipe_cost: recipeCost }, 201);
     } catch (e) {
       return error("link_exists", "این اتصال قبلاً تعریف شده است.", 409);
     }
@@ -1476,6 +1685,11 @@ async function route(request, env) {
     if (!link) return error("not_found", "اتصال انبار پیدا نشد.", 404);
 
     await env.DB.prepare("DELETE FROM catalog_inventory_links WHERE id=?").bind(id).run();
+
+    const recipeCost = await refreshCatalogRecipeCost(
+      env, link.catalog_type, Number(link.catalog_id)
+    );
+
     await audit(env, user.id, "delete_inventory_link", "inventory_link", id, {
       catalog_type: link.catalog_type,
       catalog_id: Number(link.catalog_id),
@@ -2195,7 +2409,7 @@ async function route(request, env) {
     const stockLinks = await env.DB.prepare(
       `SELECT oi.id AS order_item_id, oi.name AS order_item_name, oi.qty,
               l.inventory_item_id, l.qty_per_unit,
-              ii.name AS inventory_name, ii.stock_qty, ii.unit
+              ii.name AS inventory_name, ii.stock_qty, ii.unit, ii.purchase_price
        FROM order_items oi
        JOIN catalog_inventory_links l
          ON l.catalog_type=oi.item_type AND l.catalog_id=oi.catalog_id
@@ -2272,7 +2486,7 @@ async function route(request, env) {
           row.inventory_item_id,
           "sale",
           -consumed,
-          0,
+          Number(row.purchase_price || 0),
           orderId,
           row.order_item_id,
           "مصرف خودکار فروش: " + row.order_item_name,
