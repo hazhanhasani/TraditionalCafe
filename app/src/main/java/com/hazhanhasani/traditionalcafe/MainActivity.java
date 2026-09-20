@@ -1,5 +1,6 @@
 package com.hazhanhasani.traditionalcafe;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
@@ -329,6 +330,7 @@ public class MainActivity extends Activity {
         }
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private void registerDownloadReceiverIfNeeded() {
         if (downloadReceiverRegistered) return;
 
