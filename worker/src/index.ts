@@ -495,7 +495,7 @@ async function createBackupSnapshot(env, userId, kind = "manual", reason = "", m
 
 async function pruneAutomaticBackups(env) {
   await env.DB.prepare(
-    "DELETE FROM backup_snapshots WHERE kind IN ('daily','pre_delete','pre_restore') AND created_at < datetime('now','-30 days')"
+    "DELETE FROM backup_snapshots WHERE kind IN ('daily','pre_delete','pre_restore') AND created_at < datetime('now','-7 days')"
   ).run();
 }
 
@@ -510,12 +510,41 @@ async function loadBackupSnapshot(env, snapshotId) {
   ).bind(snapshotId).all();
 
   const tables = {};
+  const digestParts = [];
+
   for (const chunk of chunks.results || []) {
     const tableName = String(chunk.table_name || "");
     if (!validIdentifier(tableName)) continue;
+
+    const payload = String(chunk.payload || "[]");
+    const actualChunkChecksum = await sha256Hex(payload);
+    if (chunk.checksum && actualChunkChecksum !== String(chunk.checksum)) {
+      const err = new Error("backup_chunk_checksum_mismatch");
+      err.code = "backup_integrity_failed";
+      err.table = tableName;
+      err.chunk = Number(chunk.chunk_index || 0);
+      throw err;
+    }
+
+    digestParts.push(tableName + ":" + actualChunkChecksum);
+
     if (!tables[tableName]) tables[tableName] = [];
-    const rows = JSON.parse(String(chunk.payload || "[]"));
-    if (Array.isArray(rows)) tables[tableName].push(...rows);
+    const rows = JSON.parse(payload);
+    if (!Array.isArray(rows)) {
+      const err = new Error("backup_chunk_payload_invalid");
+      err.code = "backup_integrity_failed";
+      err.table = tableName;
+      err.chunk = Number(chunk.chunk_index || 0);
+      throw err;
+    }
+    tables[tableName].push(...rows);
+  }
+
+  const actualSnapshotChecksum = await sha256Hex(digestParts.join("|"));
+  if (snapshot.checksum && actualSnapshotChecksum !== String(snapshot.checksum)) {
+    const err = new Error("backup_snapshot_checksum_mismatch");
+    err.code = "backup_integrity_failed";
+    throw err;
   }
 
   return { snapshot, tables };
@@ -4286,7 +4315,19 @@ async function route(request, env) {
     }
 
     const snapshotId = decodeURIComponent(backupExport[1]);
-    const loaded = await loadBackupSnapshot(env, snapshotId);
+    let loaded;
+    try {
+      loaded = await loadBackupSnapshot(env, snapshotId);
+    } catch (e) {
+      if (e && e.code === "backup_integrity_failed") {
+        return error(
+          "backup_integrity_failed",
+          "صحت نسخه پشتیبان تایید نشد و خروجی متوقف شد.",
+          409
+        );
+      }
+      throw e;
+    }
     if (!loaded) return error("backup_not_found", "بکاپ آماده پیدا نشد.", 404);
 
     const format = String(url.searchParams.get("format") || "json").toLowerCase();
@@ -4310,7 +4351,9 @@ async function route(request, env) {
       format: "traditionalcafe-backup-v1",
       snapshot: loaded.snapshot,
       exported_at: new Date().toISOString(),
-      tables: loaded.tables
+      tables: onlyTable
+        ? { [onlyTable]: loaded.tables[onlyTable] || [] }
+        : loaded.tables
     };
     return downloadResponse(
       JSON.stringify(payload, null, 2),
@@ -4341,6 +4384,13 @@ async function route(request, env) {
     } catch (e) {
       if (e && e.code === "backup_not_found") {
         return error("backup_not_found", "بکاپ آماده پیدا نشد.", 404);
+      }
+      if (e && e.code === "backup_integrity_failed") {
+        return error(
+          "backup_integrity_failed",
+          "صحت نسخه پشتیبان تایید نشد و بازیابی متوقف شد.",
+          409
+        );
       }
       throw e;
     }
