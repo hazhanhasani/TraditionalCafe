@@ -1,4 +1,4 @@
-// full-debug-trigger: order-management-e2e
+// full-debug-trigger: customer-ledger-complete-e2e
 // setup-key-sync-trigger: configured
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
