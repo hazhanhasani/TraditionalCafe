@@ -24,7 +24,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: android-release-main
+  group: android-release-main-v2
   cancel-in-progress: true
 
 jobs:
