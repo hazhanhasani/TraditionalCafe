@@ -66,6 +66,14 @@ public class OrderActivity extends Activity {
         reload();
     }
 
+    private boolean isPrivileged() {
+        return "admin".equals(role) || "cashier".equals(role);
+    }
+
+    private boolean isAdmin() {
+        return "admin".equals(role);
+    }
+
     private View buildScreen() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -177,6 +185,24 @@ public class OrderActivity extends Activity {
             Button settle = primaryButton("تسویه سفارش");
             settle.setOnClickListener(v -> prepareSettlement());
             content.addView(settle);
+
+            Button manage = secondaryButton("مدیریت سفارش");
+            manage.setOnClickListener(v -> showOrderManagement());
+            content.addView(manage);
+        } else if ("settled".equals(status) && isPrivileged()) {
+            Button reverse = secondaryButton("برگرداندن تسویه اشتباه");
+            reverse.setOnClickListener(v -> showReverseSettlementDialog());
+            content.addView(reverse);
+
+            if (isAdmin()) {
+                Button delete = dangerButton("حذف کامل سفارش");
+                delete.setOnClickListener(v -> showHardDeleteDialog());
+                content.addView(delete);
+            }
+        } else if ("cancelled".equals(status) && isAdmin()) {
+            Button delete = dangerButton("حذف کامل سفارش");
+            delete.setOnClickListener(v -> showHardDeleteDialog());
+            content.addView(delete);
         }
 
         TextView section = text("آیتم‌های سفارش", 16, ink, true);
@@ -206,6 +232,14 @@ public class OrderActivity extends Activity {
                 meta.setGravity(Gravity.RIGHT);
                 meta.setPadding(0, dp(5), 0, 0);
                 c.addView(meta);
+
+                if ("open".equals(status)) {
+                    long itemId = item.optLong("id");
+                    String itemName = item.optString("name", "مورد");
+                    long currentQty = item.optLong("qty", 1L);
+                    c.setOnClickListener(v -> showItemActions(itemId, itemName, currentQty));
+                }
+
                 content.addView(c);
             }
         }
@@ -215,6 +249,307 @@ public class OrderActivity extends Activity {
             if (autoHookah) showCatalogPicker(true);
             else if (autoSettle) prepareSettlement();
         }
+    }
+
+    private void showItemActions(long itemId, String name, long currentQty) {
+        String[] options = new String[]{"تغییر تعداد", "حذف از سفارش"};
+        new AlertDialog.Builder(this)
+                .setTitle(name)
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) showEditQuantityDialog(itemId, name, currentQty);
+                    else showDeleteItemDialog(itemId, name);
+                })
+                .setNegativeButton("بستن", null)
+                .show();
+    }
+
+    private void showEditQuantityDialog(long itemId, String name, long currentQty) {
+        EditText qty = numberField("تعداد", String.valueOf(currentQty));
+        qty.setSelectAllOnFocus(true);
+
+        new AlertDialog.Builder(this)
+                .setTitle("تغییر تعداد • " + name)
+                .setView(qty)
+                .setPositiveButton("ذخیره", (d,w) -> {
+                    new Thread(() -> {
+                        try {
+                            long value = parseLong(qty.getText().toString());
+                            if (value <= 0) throw new IllegalArgumentException("تعداد باید بیشتر از صفر باشد.");
+                            JSONObject body = new JSONObject();
+                            body.put("qty", value);
+                            ApiClient.patch(this,
+                                    "/api/orders/" + orderId + "/items/" + itemId,
+                                    body);
+                            runOnUiThread(() -> {
+                                Toast.makeText(this, "تعداد اصلاح شد.", Toast.LENGTH_SHORT).show();
+                                reload();
+                            });
+                        } catch (Exception e) {
+                            runOnUiThread(() -> showError(e.getMessage()));
+                        }
+                    }).start();
+                })
+                .setNegativeButton("لغو", null)
+                .show();
+    }
+
+    private void showDeleteItemDialog(long itemId, String name) {
+        new AlertDialog.Builder(this)
+                .setTitle("حذف از سفارش")
+                .setMessage("«" + name + "» از این سفارش حذف شود؟")
+                .setPositiveButton("حذف", (d,w) -> {
+                    new Thread(() -> {
+                        try {
+                            ApiClient.delete(this,
+                                    "/api/orders/" + orderId + "/items/" + itemId);
+                            runOnUiThread(() -> {
+                                Toast.makeText(this, "آیتم حذف شد.", Toast.LENGTH_SHORT).show();
+                                reload();
+                            });
+                        } catch (Exception e) {
+                            runOnUiThread(() -> showError(e.getMessage()));
+                        }
+                    }).start();
+                })
+                .setNegativeButton("خیر", null)
+                .show();
+    }
+
+    private void showOrderManagement() {
+        List<String> options = new ArrayList<>();
+        options.add("انتقال سفارش به میز دیگر");
+        options.add("ادغام با سفارش میز دیگر");
+        options.add("لغو سفارش");
+        if (isAdmin()) options.add("حذف کامل سفارش");
+
+        new AlertDialog.Builder(this)
+                .setTitle("مدیریت سفارش")
+                .setItems(options.toArray(new String[0]), (dialog, which) -> {
+                    String selected = options.get(which);
+                    if (selected.startsWith("انتقال")) showTransferDialog();
+                    else if (selected.startsWith("ادغام")) showMergeDialog();
+                    else if (selected.startsWith("لغو")) showCancelDialog();
+                    else showHardDeleteDialog();
+                })
+                .setNegativeButton("بستن", null)
+                .show();
+    }
+
+    private void showTransferDialog() {
+        new Thread(() -> {
+            try {
+                JSONObject response = ApiClient.get(this, "/api/tables");
+                JSONArray tables = response.optJSONArray("tables");
+                runOnUiThread(() -> {
+                    List<Long> ids = new ArrayList<>();
+                    List<String> names = new ArrayList<>();
+
+                    if (tables != null) {
+                        for (int i = 0; i < tables.length(); i++) {
+                            JSONObject table = tables.optJSONObject(i);
+                            if (table == null) continue;
+                            boolean busy = table.optInt(
+                                    "busy",
+                                    table.optLong("order_id", 0L) > 0 ? 1 : 0
+                            ) == 1;
+                            if (!busy) {
+                                ids.add(table.optLong("id"));
+                                names.add(table.optString("name", "میز"));
+                            }
+                        }
+                    }
+
+                    if (ids.isEmpty()) {
+                        showError("هیچ میز آزادی برای انتقال وجود ندارد.");
+                        return;
+                    }
+
+                    new AlertDialog.Builder(this)
+                            .setTitle("انتقال به میز")
+                            .setItems(names.toArray(new String[0]), (d,which) ->
+                                    transferOrder(ids.get(which), names.get(which)))
+                            .setNegativeButton("لغو", null)
+                            .show();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> showError(e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void transferOrder(long tableId, String newTableName) {
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject();
+                body.put("table_id", tableId);
+                ApiClient.post(this, "/api/orders/" + orderId + "/transfer", body);
+                runOnUiThread(() -> {
+                    tableName = newTableName;
+                    Toast.makeText(this, "سفارش منتقل شد.", Toast.LENGTH_LONG).show();
+                    recreate();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> showError(e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void showMergeDialog() {
+        new Thread(() -> {
+            try {
+                JSONObject response = ApiClient.get(this, "/api/tables");
+                JSONArray tables = response.optJSONArray("tables");
+                runOnUiThread(() -> {
+                    List<Long> orderIds = new ArrayList<>();
+                    List<String> names = new ArrayList<>();
+
+                    if (tables != null) {
+                        for (int i = 0; i < tables.length(); i++) {
+                            JSONObject table = tables.optJSONObject(i);
+                            if (table == null) continue;
+                            long otherOrderId = table.optLong("order_id", 0L);
+                            if (otherOrderId > 0 && otherOrderId != orderId) {
+                                orderIds.add(otherOrderId);
+                                names.add(table.optString("name", "میز") +
+                                        " • سفارش #" + JalaliDateTime.fa(String.valueOf(otherOrderId)));
+                            }
+                        }
+                    }
+
+                    if (orderIds.isEmpty()) {
+                        showError("سفارش باز دیگری برای ادغام وجود ندارد.");
+                        return;
+                    }
+
+                    new AlertDialog.Builder(this)
+                            .setTitle("ادغام با سفارش دیگر")
+                            .setMessage("آیتم‌های سفارش انتخاب‌شده به این سفارش منتقل می‌شوند و میز آن آزاد خواهد شد.")
+                            .setItems(names.toArray(new String[0]), (d,which) ->
+                                    mergeOrder(orderIds.get(which)))
+                            .setNegativeButton("لغو", null)
+                            .show();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> showError(e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void mergeOrder(long sourceOrderId) {
+        new AlertDialog.Builder(this)
+                .setTitle("تأیید ادغام")
+                .setMessage("دو سفارش با هم ادغام شوند؟ این عملیات در گزارش فعالیت ثبت می‌شود.")
+                .setPositiveButton("ادغام", (d,w) -> {
+                    new Thread(() -> {
+                        try {
+                            JSONObject body = new JSONObject();
+                            body.put("source_order_id", sourceOrderId);
+                            ApiClient.post(this, "/api/orders/" + orderId + "/merge", body);
+                            runOnUiThread(() -> {
+                                Toast.makeText(this, "سفارش‌ها ادغام شدند.", Toast.LENGTH_LONG).show();
+                                reload();
+                            });
+                        } catch (Exception e) {
+                            runOnUiThread(() -> showError(e.getMessage()));
+                        }
+                    }).start();
+                })
+                .setNegativeButton("لغو", null)
+                .show();
+    }
+
+    private void showCancelDialog() {
+        EditText reason = field("دلیل لغو سفارش", false);
+        new AlertDialog.Builder(this)
+                .setTitle("لغو سفارش")
+                .setMessage("سفارش لغو می‌شود و میز آزاد خواهد شد. دلیل لغو در Audit Log ثبت می‌شود.")
+                .setView(reason)
+                .setPositiveButton("لغو سفارش", (d,w) -> {
+                    String text = reason.getText().toString().trim();
+                    if (text.length() < 3) {
+                        showError("دلیل لغو را وارد کنید.");
+                        return;
+                    }
+                    new Thread(() -> {
+                        try {
+                            JSONObject body = new JSONObject();
+                            body.put("reason", text);
+                            ApiClient.post(this, "/api/orders/" + orderId + "/cancel", body);
+                            runOnUiThread(() -> {
+                                Toast.makeText(this, "سفارش لغو شد.", Toast.LENGTH_LONG).show();
+                                finish();
+                            });
+                        } catch (Exception e) {
+                            runOnUiThread(() -> showError(e.getMessage()));
+                        }
+                    }).start();
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
+    }
+
+    private void showReverseSettlementDialog() {
+        EditText reason = field("دلیل برگرداندن تسویه", false);
+        new AlertDialog.Builder(this)
+                .setTitle("برگرداندن تسویه")
+                .setMessage("پرداخت‌های این سفارش حذف و سفارش دوباره باز می‌شود. این عملیات ثبت می‌شود.")
+                .setView(reason)
+                .setPositiveButton("برگرداندن", (d,w) -> {
+                    String text = reason.getText().toString().trim();
+                    if (text.length() < 3) {
+                        showError("دلیل را وارد کنید.");
+                        return;
+                    }
+                    new Thread(() -> {
+                        try {
+                            JSONObject body = new JSONObject();
+                            body.put("reason", text);
+                            ApiClient.post(this,
+                                    "/api/orders/" + orderId + "/reverse-settlement",
+                                    body);
+                            runOnUiThread(() -> {
+                                Toast.makeText(this, "تسویه برگشت داده شد و سفارش دوباره باز است.", Toast.LENGTH_LONG).show();
+                                reload();
+                            });
+                        } catch (Exception e) {
+                            runOnUiThread(() -> showError(e.getMessage()));
+                        }
+                    }).start();
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
+    }
+
+    private void showHardDeleteDialog() {
+        if (!isAdmin()) {
+            showError("حذف کامل سفارش فقط برای مدیر مجاز است.");
+            return;
+        }
+
+        EditText confirm = field("برای تأیید کلمه حذف را بنویس", false);
+        new AlertDialog.Builder(this)
+                .setTitle("حذف کامل سفارش")
+                .setMessage("این عملیات سفارش، آیتم‌ها، پرداخت‌ها و نسیه متصل به آن را از دیتابیس حذف می‌کند و قابل بازگشت نیست.")
+                .setView(confirm)
+                .setPositiveButton("حذف کامل", (d,w) -> {
+                    if (!"حذف".equals(confirm.getText().toString().trim())) {
+                        showError("برای تأیید، کلمه «حذف» را وارد کنید.");
+                        return;
+                    }
+                    new Thread(() -> {
+                        try {
+                            ApiClient.delete(this, "/api/orders/" + orderId);
+                            runOnUiThread(() -> {
+                                Toast.makeText(this, "سفارش کامل حذف شد.", Toast.LENGTH_LONG).show();
+                                finish();
+                            });
+                        } catch (Exception e) {
+                            runOnUiThread(() -> showError(e.getMessage()));
+                        }
+                    }).start();
+                })
+                .setNegativeButton("انصراف", null)
+                .show();
     }
 
     private void showCatalogPicker(boolean hookah) {
@@ -549,6 +884,46 @@ public class OrderActivity extends Activity {
         lp.setMargins(0, dp(12), 0, dp(10));
         button.setLayoutParams(lp);
         return button;
+    }
+
+    private Button secondaryButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextSize(13);
+        b.setTextColor(turquoise);
+        b.setAllCaps(false);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+
+        GradientDrawable bgDrawable = rounded(Color.WHITE, 16);
+        bgDrawable.setStroke(dp(1), turquoise);
+        b.setBackground(bgDrawable);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50)
+        );
+        lp.setMargins(0, dp(4), 0, dp(8));
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private Button dangerButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextSize(13);
+        b.setTextColor(red);
+        b.setAllCaps(false);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+
+        GradientDrawable bgDrawable = rounded(Color.rgb(250,235,232), 16);
+        bgDrawable.setStroke(dp(1), red);
+        b.setBackground(bgDrawable);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50)
+        );
+        lp.setMargins(0, dp(4), 0, dp(8));
+        b.setLayoutParams(lp);
+        return b;
     }
 
     private Button smallButton(String label) {

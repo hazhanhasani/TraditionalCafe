@@ -653,6 +653,7 @@ public class MainActivity extends Activity {
             grid.addView(actionTile("فروش‌های امروز من", "فقط فروش‌های ثبت‌شده توسط من", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
             grid.addView(actionTile("تسویه", "تسویه سفارش‌های خودم", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
         } else {
+            grid.addView(actionTile("مدیریت سفارش‌ها", "ویرایش، انتقال، لغو و اصلاح تسویه", R.drawable.ic_table, brown, softGold));
             grid.addView(actionTile("تعریف قلیان و خدمات", "نام، قیمت فروش و هزینه", R.drawable.ic_hookah, turquoise, softTeal));
             grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
             grid.addView(actionTile("تسویه", "نقد، کارت و ترکیبی", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
@@ -790,6 +791,8 @@ public class MainActivity extends Activity {
             openModule("hookah");
         } else if ("فروش‌های امروز من".equals(title)) {
             openModule("my_sales");
+        } else if ("مدیریت سفارش‌ها".equals(title)) {
+            openModule("orders");
         } else if ("تعریف قلیان و خدمات".equals(title)) {
             startActivity(new Intent(this, CatalogActivity.class));
         } else if ("حساب دفتری".equals(title)) {

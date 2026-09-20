@@ -122,6 +122,7 @@ public class OperationsActivity extends Activity {
             case "settlement": return "تسویه سفارش";
             case "reports": return "گزارش‌ها";
             case "my_sales": return "فروش‌های امروز من";
+            case "orders": return "مدیریت سفارش‌ها";
             default: return "میزها";
         }
     }
@@ -153,6 +154,9 @@ public class OperationsActivity extends Activity {
                 } else if ("my_sales".equals(module)) {
                     JSONObject r = ApiClient.get(this, "/api/my-sales/today");
                     runOnUiThread(() -> renderMySales(r.optJSONArray("sales")));
+                } else if ("orders".equals(module)) {
+                    JSONObject r = ApiClient.get(this, "/api/orders?status=all&limit=100");
+                    runOnUiThread(() -> renderOrders(r.optJSONArray("orders")));
                 }
             } catch (Exception e) {
                 runOnUiThread(() -> showError(e.getMessage()));
@@ -502,6 +506,78 @@ public class OperationsActivity extends Activity {
                 })
                 .setNegativeButton("لغو", null)
                 .show();
+    }
+
+    private void renderOrders(JSONArray orders) {
+        loading.setVisibility(View.GONE);
+        content.removeAllViews();
+
+        if ("staff".equals(role)) {
+            showAccessCard("مدیریت کامل سفارش‌ها برای مدیر یا صندوق‌دار است.");
+            return;
+        }
+
+        TextView info = text(
+                "آخرین سفارش‌ها؛ برای ویرایش، انتقال، لغو، برگرداندن تسویه یا حذف کامل روی سفارش بزن.",
+                12, muted, false
+        );
+        info.setGravity(Gravity.RIGHT);
+        info.setPadding(dp(4), 0, dp(4), dp(12));
+        content.addView(info);
+
+        if (orders == null || orders.length() == 0) {
+            showEmpty("سفارشی ثبت نشده است.");
+            return;
+        }
+
+        for (int i = 0; i < orders.length(); i++) {
+            JSONObject item = orders.optJSONObject(i);
+            if (item == null) continue;
+
+            long orderId = item.optLong("id");
+            String tableName = item.optString("table_name", "میز");
+            String status = item.optString("status", "open");
+            long total = item.optLong("total", 0L);
+
+            String statusFa = "settled".equals(status)
+                    ? "تسویه‌شده"
+                    : "cancelled".equals(status) ? "لغوشده" : "باز";
+
+            LinearLayout card = card();
+
+            TextView title = text(
+                    "#" + JalaliDateTime.fa(String.valueOf(orderId)) +
+                            " • " + tableName + " • " + statusFa,
+                    15, ink, true
+            );
+            title.setGravity(Gravity.RIGHT);
+            card.addView(title);
+
+            TextView totalView = text(money(total), 13,
+                    "cancelled".equals(status) ? muted : turquoise, true);
+            totalView.setGravity(Gravity.RIGHT);
+            totalView.setPadding(0, dp(5), 0, 0);
+            card.addView(totalView);
+
+            String openedAt = item.optString("opened_at", "");
+            String userName = item.optString("opened_by_name", "");
+            TextView detail = text(
+                    (userName.isEmpty() ? "" : "ثبت‌کننده: " + userName + "\n") +
+                            (openedAt.isEmpty() ? "" : JalaliDateTime.formatUtcCompact(openedAt)),
+                    11, muted, false
+            );
+            detail.setGravity(Gravity.RIGHT);
+            detail.setPadding(0, dp(5), 0, 0);
+            card.addView(detail);
+
+            card.setOnClickListener(v -> {
+                Intent intent = new Intent(this, OrderActivity.class);
+                intent.putExtra("order_id", orderId);
+                intent.putExtra("table_name", tableName);
+                startActivity(intent);
+            });
+            content.addView(card);
+        }
     }
 
     private void renderMySales(JSONArray sales) {

@@ -131,6 +131,11 @@ function requireRole(user, roles) {
   return user && roles.includes(user.role);
 }
 
+function canManageOrder(user, order) {
+  if (!user || !order) return false;
+  return user.role !== "staff" || Number(order.opened_by) === Number(user.id);
+}
+
 async function audit(env, userId, action, entityType = null, entityId = null, details = null) {
   try {
     await env.DB.prepare(
@@ -810,6 +815,49 @@ async function route(request, env) {
     }
   }
 
+  if (path === "/api/orders" && method === "GET") {
+    const requestedStatus = String(url.searchParams.get("status") || "all").toLowerCase();
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 100)));
+    const validStatus = ["open","settled","cancelled"].includes(requestedStatus)
+      ? requestedStatus
+      : null;
+
+    const where = [];
+    const binds = [];
+
+    if (validStatus) {
+      where.push("o.status=?");
+      binds.push(validStatus);
+    }
+
+    if (user.role === "staff") {
+      where.push("o.opened_by=?");
+      binds.push(user.id);
+      where.push("date(o.opened_at,'+3 hours','+30 minutes')=date(?)");
+      binds.push(iranDateKey());
+    }
+
+    const sql =
+      `SELECT o.id, o.table_id, o.opened_by, o.closed_by, o.status,
+              o.subtotal, o.discount, o.total, o.notes, o.cancel_reason,
+              o.opened_at, o.closed_at, o.updated_at,
+              t.name AS table_name,
+              u.name AS opened_by_name
+       FROM orders o
+       JOIN cafe_tables t ON t.id=o.table_id
+       JOIN users u ON u.id=o.opened_by
+       ${where.length ? "WHERE " + where.join(" AND ") : ""}
+       ORDER BY o.id DESC
+       LIMIT ${limit}`;
+
+    const result = await env.DB.prepare(sql).bind(...binds).all();
+    return json({
+      ok: true,
+      scope: user.role === "staff" ? "self_today" : "all",
+      orders: result.results || [],
+    });
+  }
+
   const orderItems = path.match(/^\/api\/orders\/(\d+)\/items$/);
   if (orderItems && method === "POST") {
     const orderId = Number(orderItems[1]);
@@ -870,6 +918,287 @@ async function route(request, env) {
     return json({ ok: true, id: result.meta.last_row_id, totals }, 201);
   }
 
+  const orderItem = path.match(/^\/api\/orders\/(\d+)\/items\/(\d+)$/);
+  if (orderItem && (method === "PATCH" || method === "DELETE")) {
+    const orderId = Number(orderItem[1]);
+    const itemId = Number(orderItem[2]);
+
+    const targetOrder = await env.DB.prepare(
+      "SELECT id, status, opened_by FROM orders WHERE id=?"
+    ).bind(orderId).first();
+    if (!targetOrder || targetOrder.status !== "open") {
+      return error("order_not_open", "فقط سفارش باز قابل ویرایش است.", 409);
+    }
+    if (!canManageOrder(user, targetOrder)) {
+      return error("forbidden", "شاگرد فقط می‌تواند سفارش خودش را ویرایش کند.", 403);
+    }
+
+    const item = await env.DB.prepare(
+      "SELECT id, name, qty FROM order_items WHERE id=? AND order_id=?"
+    ).bind(itemId, orderId).first();
+    if (!item) return error("not_found", "آیتم سفارش پیدا نشد.", 404);
+
+    if (method === "DELETE") {
+      await env.DB.prepare("DELETE FROM order_items WHERE id=? AND order_id=?")
+        .bind(itemId, orderId).run();
+      const totals = await recalcOrder(env, orderId);
+      await audit(env, user.id, "delete_order_item", "order_item", itemId, {
+        order_id: orderId,
+        name: item.name,
+        old_qty: Number(item.qty || 0),
+      });
+      return json({ ok: true, order_id: orderId, item_id: itemId, totals });
+    }
+
+    const data = await bodyJson(request);
+    const qty = Math.round(Number(data.qty));
+    if (!Number.isFinite(qty) || qty <= 0 || qty > 999) {
+      return error("invalid_qty", "تعداد باید بیشتر از صفر باشد.");
+    }
+
+    await env.DB.prepare(
+      "UPDATE order_items SET qty=? WHERE id=? AND order_id=?"
+    ).bind(qty, itemId, orderId).run();
+    const totals = await recalcOrder(env, orderId);
+    await audit(env, user.id, "update_order_item_qty", "order_item", itemId, {
+      order_id: orderId,
+      name: item.name,
+      old_qty: Number(item.qty || 0),
+      new_qty: qty,
+    });
+    return json({ ok: true, order_id: orderId, item_id: itemId, qty, totals });
+  }
+
+  const transferOrder = path.match(/^\/api\/orders\/(\d+)\/transfer$/);
+  if (transferOrder && method === "POST") {
+    const orderId = Number(transferOrder[1]);
+    const current = await env.DB.prepare(
+      "SELECT id, table_id, opened_by, status FROM orders WHERE id=?"
+    ).bind(orderId).first();
+    if (!current || current.status !== "open") {
+      return error("order_not_open", "فقط سفارش باز قابل انتقال است.", 409);
+    }
+    if (!canManageOrder(user, current)) {
+      return error("forbidden", "شاگرد فقط می‌تواند سفارش خودش را منتقل کند.", 403);
+    }
+
+    const data = await bodyJson(request);
+    const tableId = Number(data.table_id || 0);
+    if (!tableId || tableId === Number(current.table_id)) {
+      return error("invalid_table", "میز مقصد معتبر نیست.");
+    }
+
+    const table = await env.DB.prepare(
+      "SELECT id, name, active FROM cafe_tables WHERE id=?"
+    ).bind(tableId).first();
+    if (!table || Number(table.active) !== 1) {
+      return error("table_not_found", "میز مقصد پیدا نشد.", 404);
+    }
+
+    const occupied = await env.DB.prepare(
+      "SELECT id FROM orders WHERE table_id=? AND status='open' LIMIT 1"
+    ).bind(tableId).first();
+    if (occupied) {
+      return error("table_busy", "میز مقصد دارای سفارش باز است.", 409);
+    }
+
+    const oldTableId = Number(current.table_id);
+    await env.DB.prepare(
+      "UPDATE orders SET table_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?"
+    ).bind(tableId, orderId).run();
+
+    await audit(env, user.id, "transfer_order", "order", orderId, {
+      from_table_id: oldTableId,
+      to_table_id: tableId,
+    });
+
+    return json({
+      ok: true,
+      order_id: orderId,
+      from_table_id: oldTableId,
+      table_id: tableId,
+      table_name: table.name,
+    });
+  }
+
+  const mergeOrder = path.match(/^\/api\/orders\/(\d+)\/merge$/);
+  if (mergeOrder && method === "POST") {
+    const targetId = Number(mergeOrder[1]);
+    const data = await bodyJson(request);
+    const sourceId = Number(data.source_order_id || 0);
+
+    if (!sourceId || sourceId === targetId) {
+      return error("invalid_source", "سفارش مبدا برای ادغام معتبر نیست.");
+    }
+
+    const target = await env.DB.prepare(
+      "SELECT id, table_id, opened_by, status FROM orders WHERE id=?"
+    ).bind(targetId).first();
+    const source = await env.DB.prepare(
+      "SELECT id, table_id, opened_by, status FROM orders WHERE id=?"
+    ).bind(sourceId).first();
+
+    if (!target || !source || target.status !== "open" || source.status !== "open") {
+      return error("order_not_open", "برای ادغام، هر دو سفارش باید باز باشند.", 409);
+    }
+
+    if (user.role === "staff" && (
+      Number(target.opened_by) !== Number(user.id) ||
+      Number(source.opened_by) !== Number(user.id)
+    )) {
+      return error("forbidden", "شاگرد فقط می‌تواند سفارش‌های خودش را با هم ادغام کند.", 403);
+    }
+
+    await env.DB.batch([
+      env.DB.prepare("UPDATE order_items SET order_id=? WHERE order_id=?").bind(targetId, sourceId),
+      env.DB.prepare(
+        `UPDATE orders
+         SET status='cancelled',
+             cancel_reason=?,
+             closed_by=?,
+             closed_at=CURRENT_TIMESTAMP,
+             updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
+      ).bind("ادغام با سفارش #" + targetId, user.id, sourceId),
+    ]);
+
+    const totals = await recalcOrder(env, targetId);
+    await audit(env, user.id, "merge_orders", "order", targetId, {
+      source_order_id: sourceId,
+      source_table_id: Number(source.table_id),
+      target_table_id: Number(target.table_id),
+    });
+
+    return json({
+      ok: true,
+      target_order_id: targetId,
+      source_order_id: sourceId,
+      totals,
+    });
+  }
+
+  const cancelOrder = path.match(/^\/api\/orders\/(\d+)\/cancel$/);
+  if (cancelOrder && method === "POST") {
+    const orderId = Number(cancelOrder[1]);
+    const current = await env.DB.prepare(
+      "SELECT id, opened_by, status, total FROM orders WHERE id=?"
+    ).bind(orderId).first();
+    if (!current || current.status !== "open") {
+      return error("order_not_open", "فقط سفارش باز قابل لغو است.", 409);
+    }
+    if (!canManageOrder(user, current)) {
+      return error("forbidden", "شاگرد فقط می‌تواند سفارش خودش را لغو کند.", 403);
+    }
+
+    const data = await bodyJson(request);
+    const reason = String(data.reason || "").trim();
+    if (reason.length < 3 || reason.length > 300) {
+      return error("reason_required", "دلیل لغو را وارد کنید.");
+    }
+
+    await env.DB.prepare(
+      `UPDATE orders
+       SET status='cancelled',
+           cancel_reason=?,
+           closed_by=?,
+           closed_at=CURRENT_TIMESTAMP,
+           updated_at=CURRENT_TIMESTAMP
+       WHERE id=?`
+    ).bind(reason, user.id, orderId).run();
+
+    await audit(env, user.id, "cancel_order", "order", orderId, {
+      reason,
+      total: Number(current.total || 0),
+    });
+    return json({ ok: true, order_id: orderId, status: "cancelled", reason });
+  }
+
+  const reverseSettlement = path.match(/^\/api\/orders\/(\d+)\/reverse-settlement$/);
+  if (reverseSettlement && method === "POST") {
+    if (!requireRole(user, ["admin","cashier"])) {
+      return error("forbidden", "برگرداندن تسویه فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    }
+
+    const orderId = Number(reverseSettlement[1]);
+    const current = await env.DB.prepare(
+      "SELECT id, status, total, table_id, closed_at FROM orders WHERE id=?"
+    ).bind(orderId).first();
+    if (!current || current.status !== "settled") {
+      return error("not_settled", "این سفارش در وضعیت تسویه‌شده نیست.", 409);
+    }
+
+    const occupied = await env.DB.prepare(
+      "SELECT id FROM orders WHERE table_id=? AND status='open' LIMIT 1"
+    ).bind(current.table_id).first();
+    if (occupied) {
+      return error(
+        "table_busy",
+        "میز این سفارش اکنون سفارش باز دیگری دارد. ابتدا آن سفارش را منتقل یا تسویه کنید.",
+        409
+      );
+    }
+
+    const creditRows = await env.DB.prepare(
+      `SELECT customer_id, created_at
+       FROM customer_ledger
+       WHERE order_id=? AND entry_type='debt'`
+    ).bind(orderId).all();
+
+    for (const debt of creditRows.results || []) {
+      const laterPayment = await env.DB.prepare(
+        `SELECT id FROM customer_ledger
+         WHERE customer_id=? AND entry_type='payment' AND created_at>?
+         LIMIT 1`
+      ).bind(debt.customer_id, debt.created_at).first();
+      if (laterPayment) {
+        return error(
+          "credit_already_changed",
+          "بعد از این نسیه، پرداختی در حساب مشتری ثبت شده است؛ ابتدا گردش حساب مشتری را بررسی کنید.",
+          409
+        );
+      }
+    }
+
+    const data = await bodyJson(request);
+    const reason = String(data.reason || "").trim();
+    if (reason.length < 3 || reason.length > 300) {
+      return error("reason_required", "دلیل برگرداندن تسویه را وارد کنید.");
+    }
+
+    const oldPayments = await env.DB.prepare(
+      "SELECT method, amount, customer_id FROM payments WHERE order_id=? ORDER BY id"
+    ).bind(orderId).all();
+
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM customer_ledger WHERE order_id=? AND entry_type='debt'").bind(orderId),
+      env.DB.prepare("DELETE FROM payments WHERE order_id=?").bind(orderId),
+      env.DB.prepare(
+        `UPDATE orders
+         SET status='open',
+             discount=0,
+             closed_by=NULL,
+             closed_at=NULL,
+             cancel_reason=NULL,
+             updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
+      ).bind(orderId),
+    ]);
+
+    const totals = await recalcOrder(env, orderId);
+    await audit(env, user.id, "reverse_settlement", "order", orderId, {
+      reason,
+      previous_total: Number(current.total || 0),
+      previous_payments: oldPayments.results || [],
+    });
+
+    return json({
+      ok: true,
+      order_id: orderId,
+      status: "open",
+      totals,
+    });
+  }
+
   const orderDetail = path.match(/^\/api\/orders\/(\d+)$/);
   if (orderDetail && method === "GET") {
     const orderId = Number(orderDetail[1]);
@@ -893,6 +1222,67 @@ async function route(request, env) {
         ).bind(orderId).all();
     const payments = await env.DB.prepare("SELECT * FROM payments WHERE order_id=? ORDER BY id").bind(orderId).all();
     return json({ ok: true, order, items: items.results || [], payments: payments.results || [] });
+  }
+
+  if (orderDetail && method === "DELETE") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "حذف کامل سفارش فقط برای مدیر مجاز است.", 403);
+    }
+
+    const orderId = Number(orderDetail[1]);
+    const current = await env.DB.prepare(
+      `SELECT o.*, t.name AS table_name, u.username AS opened_by_username
+       FROM orders o
+       JOIN cafe_tables t ON t.id=o.table_id
+       JOIN users u ON u.id=o.opened_by
+       WHERE o.id=?`
+    ).bind(orderId).first();
+    if (!current) return error("not_found", "سفارش پیدا نشد.", 404);
+
+    const itemIds = await env.DB.prepare(
+      "SELECT id FROM order_items WHERE order_id=?"
+    ).bind(orderId).all();
+
+    const snapshot = {
+      id: Number(current.id),
+      table_id: Number(current.table_id),
+      table_name: current.table_name,
+      opened_by: current.opened_by_username,
+      status: current.status,
+      total: Number(current.total || 0),
+      opened_at: current.opened_at,
+      closed_at: current.closed_at,
+    };
+
+    const statements = [
+      env.DB.prepare("DELETE FROM customer_ledger WHERE order_id=?").bind(orderId),
+      env.DB.prepare("DELETE FROM payments WHERE order_id=?").bind(orderId),
+    ];
+
+    for (const row of itemIds.results || []) {
+      statements.push(
+        env.DB.prepare(
+          "DELETE FROM audit_logs WHERE entity_type='order_item' AND entity_id=?"
+        ).bind(row.id)
+      );
+    }
+
+    statements.push(
+      env.DB.prepare(
+        "DELETE FROM audit_logs WHERE entity_type='order' AND entity_id=?"
+      ).bind(orderId)
+    );
+    statements.push(
+      env.DB.prepare("DELETE FROM order_items WHERE order_id=?").bind(orderId)
+    );
+    statements.push(
+      env.DB.prepare("DELETE FROM orders WHERE id=?").bind(orderId)
+    );
+
+    await env.DB.batch(statements);
+    await audit(env, user.id, "hard_delete_order", "deleted_order", orderId, snapshot);
+
+    return json({ ok: true, deleted_order_id: orderId });
   }
 
   const settle = path.match(/^\/api\/orders\/(\d+)\/settle$/);

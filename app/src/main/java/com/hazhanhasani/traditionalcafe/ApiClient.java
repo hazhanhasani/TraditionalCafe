@@ -30,6 +30,10 @@ public final class ApiClient {
         return request(context, "PATCH", path, body == null ? new JSONObject() : body);
     }
 
+    public static JSONObject delete(Context context, String path) throws Exception {
+        return request(context, "DELETE", path, new JSONObject());
+    }
+
     public static JSONObject request(Context context, String method, String path, JSONObject body) throws Exception {
         HttpURLConnection connection = null;
         try {
