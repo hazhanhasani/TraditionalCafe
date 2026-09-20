@@ -5,6 +5,8 @@ import android.content.Context;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -32,6 +34,53 @@ public final class ApiClient {
 
     public static JSONObject delete(Context context, String path) throws Exception {
         return request(context, "DELETE", path, new JSONObject());
+    }
+
+    public static byte[] download(Context context, String path) throws Exception {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(BASE + path).openConnection();
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(30000);
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Accept", "*/*");
+
+            String token = context.getSharedPreferences("session", Context.MODE_PRIVATE)
+                    .getString("token", "");
+            if (token != null && !token.isEmpty()) {
+                connection.setRequestProperty("Authorization", "Bearer " + token);
+            }
+
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                    ? connection.getInputStream()
+                    : connection.getErrorStream();
+
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            int read;
+            while ((read = stream.read(chunk)) != -1) {
+                buffer.write(chunk, 0, read);
+            }
+            stream.close();
+
+            byte[] bytes = buffer.toByteArray();
+            if (status < 200 || status >= 300) {
+                String raw = new String(bytes, StandardCharsets.UTF_8);
+                String message = "خطای ارتباط با سرور";
+                String code = "api_error";
+                try {
+                    JSONObject response = new JSONObject(raw);
+                    message = response.optString("message", message);
+                    code = response.optString("error", code);
+                } catch (Exception ignored) {
+                }
+                throw new ApiException(status, code, message);
+            }
+            return bytes;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
     }
 
     public static JSONObject request(Context context, String method, String path, JSONObject body) throws Exception {
