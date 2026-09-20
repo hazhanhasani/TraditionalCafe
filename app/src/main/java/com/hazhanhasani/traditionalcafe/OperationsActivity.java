@@ -197,8 +197,13 @@ public class OperationsActivity extends Activity {
             nameView.setGravity(Gravity.RIGHT);
             texts.addView(nameView);
 
+            String openedAt = table.optString("opened_at", "");
+            String stateText = busy
+                    ? "سفارش باز • " + money(total) +
+                      (openedAt.isEmpty() ? "" : "\n" + JalaliDateTime.formatUtcCompact(openedAt))
+                    : "آزاد";
             TextView state = text(
-                    busy ? "سفارش باز • " + money(total) : "آزاد",
+                    stateText,
                     12, busy ? brown : green, false
             );
             state.setGravity(Gravity.RIGHT);
@@ -353,7 +358,10 @@ public class OperationsActivity extends Activity {
                             String type = e.optString("entry_type");
                             String label = "payment".equals(type) ? "پرداخت" :
                                     "debt".equals(type) ? "بدهی" : "اصلاح";
-                            TextView row = text(label + " • " + money(Math.abs(amount)), 12,
+                            String at = e.optString("created_at", "");
+                            String rowText = label + " • " + money(Math.abs(amount)) +
+                                    (at.isEmpty() ? "" : "\n" + JalaliDateTime.formatUtcCompact(at));
+                            TextView row = text(rowText, 12,
                                     amount > 0 ? red : green, false);
                             row.setGravity(Gravity.RIGHT);
                             row.setPadding(0, dp(6), 0, dp(6));
@@ -436,6 +444,14 @@ public class OperationsActivity extends Activity {
                 d.setPadding(0, dp(4), 0, 0);
                 c.addView(d);
             }
+
+            String createdAt = expense.optString("created_at", "");
+            if (!createdAt.isEmpty()) {
+                TextView at = text(JalaliDateTime.formatUtcCompact(createdAt), 10, muted, false);
+                at.setGravity(Gravity.RIGHT);
+                at.setPadding(0, dp(5), 0, 0);
+                c.addView(at);
+            }
             content.addView(c);
         }
     }
@@ -477,6 +493,11 @@ public class OperationsActivity extends Activity {
     private void renderReports(JSONObject report) {
         loading.setVisibility(View.GONE);
         content.removeAllViews();
+
+        TextView now = text(JalaliDateTime.nowFull() + " • ساعت ایران", 12, muted, false);
+        now.setGravity(Gravity.RIGHT);
+        now.setPadding(dp(4), 0, dp(4), dp(10));
+        content.addView(now);
 
         addReportCard("فروش کل", report.optLong("sales"), turquoise);
         addReportCard("تعداد سفارش تسویه‌شده", report.optLong("settled_orders"), ink, false);
@@ -603,7 +624,7 @@ public class OperationsActivity extends Activity {
     }
 
     private String money(long value) {
-        return String.format(Locale.US, "%,d تومان", value);
+        return JalaliDateTime.fa(String.format(Locale.US, "%,d تومان", value));
     }
 
     private long parseLong(String value) {
