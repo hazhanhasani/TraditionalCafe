@@ -22,6 +22,9 @@
             android:name=".CatalogActivity"
             android:exported="false" />
         <activity
+            android:name=".DebugActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity
