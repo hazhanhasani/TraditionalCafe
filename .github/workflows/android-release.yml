@@ -84,10 +84,21 @@ jobs:
           TC_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           TC_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           TC_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          APP_VERSION_NAME: ${{ github.event.inputs.version_name || '0.1.1' }}
-          APP_VERSION_CODE: ${{ github.event.inputs.version_code || github.run_number }}
+          APP_VERSION_NAME_INPUT: ${{ github.event.inputs.version_name }}
+          APP_VERSION_CODE_INPUT: ${{ github.event.inputs.version_code }}
         run: |
           set -euo pipefail
+          if [ -n "${APP_VERSION_NAME_INPUT:-}" ]; then
+            export APP_VERSION_NAME="$APP_VERSION_NAME_INPUT"
+          else
+            export APP_VERSION_NAME="0.1.${GITHUB_RUN_NUMBER}"
+          fi
+          if [ -n "${APP_VERSION_CODE_INPUT:-}" ]; then
+            export APP_VERSION_CODE="$APP_VERSION_CODE_INPUT"
+          else
+            export APP_VERSION_CODE="$((100000 + GITHUB_RUN_NUMBER))"
+          fi
+          echo "Building versionName=$APP_VERSION_NAME versionCode=$APP_VERSION_CODE"
           gradle --no-daemon clean :app:assembleRelease
 
       - name: Verify launcher class is inside APK
