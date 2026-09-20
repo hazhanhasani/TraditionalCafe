@@ -296,6 +296,10 @@ function auditCategory(action) {
   ].includes(value)) return "sales";
 
   if ([
+    "create_backup","scheduled_backup","restore_backup","delete_backup"
+  ].includes(value)) return "system";
+
+  if ([
     "open_shift","close_shift","create_expense","customer_payment",
     "customer_ledger_adjustment"
   ].includes(value)) return "finance";
@@ -318,7 +322,7 @@ function auditSeverity(action) {
   const value = String(action || "");
   if ([
     "hard_delete_order","reverse_settlement","update_role_permissions",
-    "customer_ledger_adjustment"
+    "customer_ledger_adjustment","restore_backup"
   ].includes(value)) return "critical";
 
   if ([
@@ -343,6 +347,343 @@ async function audit(env, userId, action, entityType = null, entityId = null, de
   } catch {
     // Audit logging must never make a business action fail.
   }
+}
+
+
+const BACKUP_EXCLUDED_TABLES = new Set([
+  "backup_snapshots",
+  "backup_snapshot_chunks",
+  "d1_migrations",
+  "sessions"
+]);
+
+function backupId() {
+  return "bkp_" + Date.now().toString(36) + "_" + randomHex(6);
+}
+
+function validIdentifier(value) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(value || ""));
+}
+
+function quoteIdentifier(value) {
+  const name = String(value || "");
+  if (!validIdentifier(name)) throw new Error("invalid_identifier");
+  return '"' + name + '"';
+}
+
+async function backupTableNames(env) {
+  const rows = await env.DB.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+  ).all();
+  return (rows.results || [])
+    .map((row) => String(row.name || ""))
+    .filter((name) => validIdentifier(name) && !BACKUP_EXCLUDED_TABLES.has(name));
+}
+
+async function flushBackupChunk(env, snapshotId, tableName, chunkIndex, rows) {
+  const payload = JSON.stringify(rows);
+  const checksum = await sha256Hex(payload);
+  await env.DB.prepare(
+    "INSERT INTO backup_snapshot_chunks (snapshot_id,table_name,chunk_index,row_count,payload,checksum) VALUES (?,?,?,?,?,?)"
+  ).bind(snapshotId, tableName, chunkIndex, rows.length, payload, checksum).run();
+  return { bytes: encoder.encode(payload).byteLength, checksum };
+}
+
+async function createBackupSnapshot(env, userId, kind = "manual", reason = "", metadata = {}) {
+  const allowedKinds = ["manual","daily","pre_delete","pre_restore"];
+  if (!allowedKinds.includes(kind)) throw new Error("invalid_backup_kind");
+
+  const id = backupId();
+  await env.DB.prepare(
+    "INSERT INTO backup_snapshots (id,kind,reason,status,created_by,metadata) VALUES (?,?,?,?,?,?)"
+  ).bind(
+    id,
+    kind,
+    String(reason || "").slice(0, 240) || null,
+    "creating",
+    userId || null,
+    JSON.stringify(metadata || {})
+  ).run();
+
+  try {
+    const tables = await backupTableNames(env);
+    let rowCount = 0;
+    let sizeBytes = 0;
+    const digestParts = [];
+
+    for (const table of tables) {
+      const result = await env.DB.prepare(
+        "SELECT * FROM " + quoteIdentifier(table)
+      ).all();
+      const rows = result.results || [];
+      rowCount += rows.length;
+
+      let chunk = [];
+      let chunkIndex = 0;
+      let approxBytes = 2;
+
+      const flush = async () => {
+        if (chunk.length === 0) return;
+        const saved = await flushBackupChunk(
+          env,
+          id,
+          table,
+          chunkIndex++,
+          chunk
+        );
+        sizeBytes += saved.bytes;
+        digestParts.push(table + ":" + saved.checksum);
+        chunk = [];
+        approxBytes = 2;
+      };
+
+      for (const row of rows) {
+        const encoded = JSON.stringify(row);
+        const rowBytes = encoder.encode(encoded).byteLength + 1;
+        if (chunk.length > 0 && (chunk.length >= 100 || approxBytes + rowBytes > 280000)) {
+          await flush();
+        }
+        chunk.push(row);
+        approxBytes += rowBytes;
+      }
+
+      await flush();
+
+      if (rows.length === 0) {
+        const saved = await flushBackupChunk(env, id, table, 0, []);
+        sizeBytes += saved.bytes;
+        digestParts.push(table + ":" + saved.checksum);
+      }
+    }
+
+    const checksum = await sha256Hex(digestParts.join("|"));
+    const finalMetadata = {
+      ...(metadata || {}),
+      schema_version: 1,
+      tables
+    };
+
+    await env.DB.prepare(
+      "UPDATE backup_snapshots SET status='ready',completed_at=CURRENT_TIMESTAMP,table_count=?,row_count=?,size_bytes=?,checksum=?,metadata=? WHERE id=?"
+    ).bind(
+      tables.length,
+      rowCount,
+      sizeBytes,
+      checksum,
+      JSON.stringify(finalMetadata),
+      id
+    ).run();
+
+    return await env.DB.prepare(
+      "SELECT * FROM backup_snapshots WHERE id=?"
+    ).bind(id).first();
+  } catch (e) {
+    try {
+      await env.DB.prepare(
+        "UPDATE backup_snapshots SET status='failed',completed_at=CURRENT_TIMESTAMP,metadata=? WHERE id=?"
+      ).bind(
+        JSON.stringify({
+          ...(metadata || {}),
+          error: String(e && e.message ? e.message : e)
+        }),
+        id
+      ).run();
+    } catch {}
+    throw e;
+  }
+}
+
+async function pruneAutomaticBackups(env) {
+  await env.DB.prepare(
+    "DELETE FROM backup_snapshots WHERE kind IN ('daily','pre_delete','pre_restore') AND created_at < datetime('now','-30 days')"
+  ).run();
+}
+
+async function loadBackupSnapshot(env, snapshotId) {
+  const snapshot = await env.DB.prepare(
+    "SELECT * FROM backup_snapshots WHERE id=?"
+  ).bind(snapshotId).first();
+  if (!snapshot || snapshot.status !== "ready") return null;
+
+  const chunks = await env.DB.prepare(
+    "SELECT table_name,chunk_index,payload,row_count,checksum FROM backup_snapshot_chunks WHERE snapshot_id=? ORDER BY table_name,chunk_index"
+  ).bind(snapshotId).all();
+
+  const tables = {};
+  for (const chunk of chunks.results || []) {
+    const tableName = String(chunk.table_name || "");
+    if (!validIdentifier(tableName)) continue;
+    if (!tables[tableName]) tables[tableName] = [];
+    const rows = JSON.parse(String(chunk.payload || "[]"));
+    if (Array.isArray(rows)) tables[tableName].push(...rows);
+  }
+
+  return { snapshot, tables };
+}
+
+async function tableRestoreOrder(env, tableNames) {
+  const available = new Set(tableNames.filter(validIdentifier));
+  const dependencies = new Map();
+
+  for (const table of available) {
+    const rows = await env.DB.prepare(
+      "PRAGMA foreign_key_list(" + quoteIdentifier(table) + ")"
+    ).all();
+    const deps = new Set();
+    for (const row of rows.results || []) {
+      const parent = String(row.table || "");
+      if (available.has(parent) && parent !== table) deps.add(parent);
+    }
+    dependencies.set(table, deps);
+  }
+
+  const remaining = new Set(available);
+  const ordered = [];
+  while (remaining.size > 0) {
+    let progressed = false;
+    for (const table of Array.from(remaining)) {
+      const deps = dependencies.get(table) || new Set();
+      const unresolved = Array.from(deps).some((dep) => remaining.has(dep));
+      if (!unresolved) {
+        ordered.push(table);
+        remaining.delete(table);
+        progressed = true;
+      }
+    }
+    if (!progressed) {
+      ordered.push(...Array.from(remaining).sort());
+      break;
+    }
+  }
+  return ordered;
+}
+
+async function executeStatementBatches(env, statements, size = 50) {
+  for (let i = 0; i < statements.length; i += size) {
+    await env.DB.batch(statements.slice(i, i + size));
+  }
+}
+
+async function restoreBackupSnapshot(env, user, request, snapshotId) {
+  const loaded = await loadBackupSnapshot(env, snapshotId);
+  if (!loaded) {
+    const err = new Error("backup_not_found");
+    err.code = "backup_not_found";
+    throw err;
+  }
+
+  const protectedTables = new Set([
+    "users",
+    "sessions",
+    "role_permissions",
+    "backup_snapshots",
+    "backup_snapshot_chunks",
+    "d1_migrations"
+  ]);
+
+  const restoreTables = Object.keys(loaded.tables)
+    .filter((name) => validIdentifier(name) && !protectedTables.has(name));
+
+  const safety = await createBackupSnapshot(
+    env,
+    user.id,
+    "pre_restore",
+    "before_restore:" + snapshotId,
+    { source_backup_id: snapshotId }
+  );
+
+  const order = await tableRestoreOrder(env, restoreTables);
+
+  const deletes = order
+    .slice()
+    .reverse()
+    .map((table) => env.DB.prepare("DELETE FROM " + quoteIdentifier(table)));
+  await executeStatementBatches(env, deletes, 40);
+
+  for (const table of order) {
+    const rows = loaded.tables[table] || [];
+    const inserts = [];
+
+    for (const row of rows) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      const columns = Object.keys(row).filter(validIdentifier);
+      if (columns.length === 0) continue;
+      const sql =
+        "INSERT INTO " + quoteIdentifier(table) +
+        " (" + columns.map(quoteIdentifier).join(",") + ")" +
+        " VALUES (" + columns.map(() => "?").join(",") + ")";
+      inserts.push(
+        env.DB.prepare(sql).bind(...columns.map((column) => row[column]))
+      );
+    }
+
+    await executeStatementBatches(env, inserts, 40);
+  }
+
+  await audit(env, user.id, "restore_backup", "backup_snapshot", null, {
+    backup_id: snapshotId,
+    safety_backup_id: safety.id,
+    restored_tables: restoreTables.length
+  });
+
+  return {
+    backup_id: snapshotId,
+    safety_backup_id: safety.id,
+    restored_tables: restoreTables.length
+  };
+}
+
+function csvEscape(value) {
+  if (value === null || value === undefined) return "";
+  const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+
+function backupCsv(tables, onlyTable = "") {
+  if (onlyTable) {
+    const rows = Array.isArray(tables[onlyTable]) ? tables[onlyTable] : [];
+    const columns = [];
+    const seen = new Set();
+    for (const row of rows) {
+      for (const key of Object.keys(row || {})) {
+        if (validIdentifier(key) && !seen.has(key)) {
+          seen.add(key);
+          columns.push(key);
+        }
+      }
+    }
+    const lines = [columns.map(csvEscape).join(",")];
+    for (const row of rows) {
+      lines.push(columns.map((column) => csvEscape(row[column])).join(","));
+    }
+    return lines.join("\r\n");
+  }
+
+  const lines = ['"table","row_number","row_json"'];
+  for (const table of Object.keys(tables).sort()) {
+    const rows = Array.isArray(tables[table]) ? tables[table] : [];
+    if (rows.length === 0) {
+      lines.push([csvEscape(table), csvEscape(0), csvEscape({})].join(","));
+      continue;
+    }
+    rows.forEach((row, index) => {
+      lines.push([
+        csvEscape(table),
+        csvEscape(index + 1),
+        csvEscape(row)
+      ].join(","));
+    });
+  }
+  return lines.join("\r\n");
+}
+
+function downloadResponse(body, contentType, filename) {
+  const headers = {
+    ...JSON_HEADERS,
+    "content-type": contentType,
+    "content-disposition": 'attachment; filename="' + filename + '"'
+  };
+  return new Response(body, { status: 200, headers });
 }
 
 function parseUtcMillis(value) {
@@ -2716,6 +3057,14 @@ async function route(request, env) {
       closed_at: current.closed_at,
     };
 
+    const safetyBackup = await createBackupSnapshot(
+      env,
+      user.id,
+      "pre_delete",
+      "before_hard_delete_order:" + orderId,
+      { entity_type: "order", entity_id: orderId }
+    );
+
     const statements = [
       env.DB.prepare("DELETE FROM customer_ledger WHERE order_id=?").bind(orderId),
       env.DB.prepare("DELETE FROM payments WHERE order_id=?").bind(orderId),
@@ -2759,7 +3108,11 @@ async function route(request, env) {
     await env.DB.batch(statements);
     await audit(env, user.id, "hard_delete_order", "deleted_order", orderId, snapshot);
 
-    return json({ ok: true, deleted_order_id: orderId });
+    return json({
+      ok: true,
+      deleted_order_id: orderId,
+      safety_backup_id: safetyBackup.id
+    });
   }
 
   const settle = path.match(/^\/api\/orders\/(\d+)\/settle$/);
@@ -3852,6 +4205,163 @@ async function route(request, env) {
     });
   }
 
+  if (path === "/api/backups" && method === "GET") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "مدیریت بکاپ فقط برای مدیر مجاز است.", 403);
+    }
+
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") || 50)));
+    const rows = await env.DB.prepare(
+      `SELECT id,kind,reason,status,created_by,created_at,completed_at,
+              table_count,row_count,size_bytes,checksum,metadata
+       FROM backup_snapshots
+       ORDER BY created_at DESC,id DESC
+       LIMIT ${limit}`
+    ).all();
+
+    const summary = await env.DB.prepare(
+      `SELECT
+          COUNT(*) AS total,
+          COALESCE(SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END),0) AS ready,
+          COALESCE(SUM(CASE WHEN kind='daily' AND status='ready' THEN 1 ELSE 0 END),0) AS daily,
+          COALESCE(SUM(size_bytes),0) AS total_bytes
+       FROM backup_snapshots`
+    ).first();
+
+    const last = await env.DB.prepare(
+      `SELECT id,kind,reason,status,created_at,completed_at,table_count,row_count,size_bytes,checksum
+       FROM backup_snapshots
+       WHERE status='ready'
+       ORDER BY created_at DESC,id DESC
+       LIMIT 1`
+    ).first();
+
+    return json({
+      ok: true,
+      timezone: IRAN_TIME_ZONE,
+      last_backup: last || null,
+      summary: {
+        total: Number(summary?.total || 0),
+        ready: Number(summary?.ready || 0),
+        daily: Number(summary?.daily || 0),
+        total_bytes: Number(summary?.total_bytes || 0)
+      },
+      backups: rows.results || []
+    });
+  }
+
+  if (path === "/api/backups" && method === "POST") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "ساخت بکاپ فقط برای مدیر مجاز است.", 403);
+    }
+
+    const data = await bodyJson(request);
+    const reason = String(data.reason || "manual").trim().slice(0, 240);
+    const backup = await createBackupSnapshot(
+      env,
+      user.id,
+      "manual",
+      reason || "manual",
+      { requested_from: "api" }
+    );
+    await pruneAutomaticBackups(env);
+    await audit(env, user.id, "create_backup", "backup_snapshot", null, {
+      backup_id: backup.id,
+      kind: backup.kind,
+      row_count: Number(backup.row_count || 0),
+      size_bytes: Number(backup.size_bytes || 0)
+    });
+
+    return json({ ok: true, backup }, 201);
+  }
+
+  const backupExport = path.match(/^\/api\/backups\/([^/]+)\/export$/);
+  if (backupExport && method === "GET") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "خروجی بکاپ فقط برای مدیر مجاز است.", 403);
+    }
+
+    const snapshotId = decodeURIComponent(backupExport[1]);
+    const loaded = await loadBackupSnapshot(env, snapshotId);
+    if (!loaded) return error("backup_not_found", "بکاپ آماده پیدا نشد.", 404);
+
+    const format = String(url.searchParams.get("format") || "json").toLowerCase();
+    const onlyTable = String(url.searchParams.get("table") || "").trim();
+
+    if (onlyTable && !Object.prototype.hasOwnProperty.call(loaded.tables, onlyTable)) {
+      return error("backup_table_not_found", "جدول در این بکاپ وجود ندارد.", 404);
+    }
+
+    if (format === "csv") {
+      const body = backupCsv(loaded.tables, onlyTable);
+      const suffix = onlyTable ? "-" + onlyTable : "";
+      return downloadResponse(
+        "\uFEFF" + body,
+        "text/csv; charset=utf-8",
+        "traditionalcafe-" + snapshotId + suffix + ".csv"
+      );
+    }
+
+    const payload = {
+      format: "traditionalcafe-backup-v1",
+      snapshot: loaded.snapshot,
+      exported_at: new Date().toISOString(),
+      tables: loaded.tables
+    };
+    return downloadResponse(
+      JSON.stringify(payload, null, 2),
+      "application/json; charset=utf-8",
+      "traditionalcafe-" + snapshotId + ".json"
+    );
+  }
+
+  const backupRestore = path.match(/^\/api\/backups\/([^/]+)\/restore$/);
+  if (backupRestore && method === "POST") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "بازیابی بکاپ فقط برای مدیر مجاز است.", 403);
+    }
+
+    const data = await bodyJson(request);
+    if (String(data.confirm || "") !== "RESTORE") {
+      return error(
+        "restore_confirmation_required",
+        "برای بازیابی باید تایید RESTORE ارسال شود.",
+        409
+      );
+    }
+
+    const snapshotId = decodeURIComponent(backupRestore[1]);
+    try {
+      const result = await restoreBackupSnapshot(env, user, request, snapshotId);
+      return json({ ok: true, ...result });
+    } catch (e) {
+      if (e && e.code === "backup_not_found") {
+        return error("backup_not_found", "بکاپ آماده پیدا نشد.", 404);
+      }
+      throw e;
+    }
+  }
+
+  const backupDelete = path.match(/^\/api\/backups\/([^/]+)$/);
+  if (backupDelete && method === "DELETE") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "حذف بکاپ فقط برای مدیر مجاز است.", 403);
+    }
+
+    const snapshotId = decodeURIComponent(backupDelete[1]);
+    const existing = await env.DB.prepare(
+      "SELECT id,kind,status FROM backup_snapshots WHERE id=?"
+    ).bind(snapshotId).first();
+    if (!existing) return error("backup_not_found", "بکاپ پیدا نشد.", 404);
+
+    await env.DB.prepare("DELETE FROM backup_snapshots WHERE id=?").bind(snapshotId).run();
+    await audit(env, user.id, "delete_backup", "backup_snapshot", null, {
+      backup_id: snapshotId,
+      kind: existing.kind
+    });
+    return json({ ok: true, deleted_backup_id: snapshotId });
+  }
+
   if (path === "/api/audit" && method === "GET") {
     if (!(await hasPermission(env, user, "view_audit_log"))) {
       return error("forbidden", "مجوز مشاهده مرکز فعالیت‌ها فعال نیست.", 403);
@@ -4081,5 +4591,30 @@ export default {
       console.error(e);
       return error("internal_error", "Unexpected server error.", 500);
     }
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil((async () => {
+      try {
+        const backup = await createBackupSnapshot(
+          env,
+          null,
+          "daily",
+          "automatic_daily",
+          {
+            trigger: controller && controller.cron ? controller.cron : "scheduled",
+            iran_date: iranDateKey()
+          }
+        );
+        await pruneAutomaticBackups(env);
+        await audit(env, null, "scheduled_backup", "backup_snapshot", null, {
+          backup_id: backup.id,
+          row_count: Number(backup.row_count || 0),
+          size_bytes: Number(backup.size_bytes || 0)
+        });
+      } catch (e) {
+        console.error("scheduled_backup_failed", e);
+      }
+    })());
   },
 };
