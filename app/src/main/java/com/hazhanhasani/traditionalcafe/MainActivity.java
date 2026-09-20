@@ -677,6 +677,9 @@ public class MainActivity extends Activity {
             if (PermissionStore.has(this, "manage_expenses")) {
                 grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
             }
+            if (PermissionStore.has(this, "manage_inventory")) {
+                grid.addView(actionTile("انبار و موجودی", "خرید، موجودی، کمبود و اتصال به فروش", R.drawable.ic_expense, Color.rgb(14, 117, 120), softTeal));
+            }
             grid.addView(actionTile("تسویه", "نقد، کارت و ترکیبی", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
             if (PermissionStore.has(this, "view_reports")) {
                 grid.addView(actionTile("گزارش‌ها", "سود و زیان و عملکرد", R.drawable.ic_chart, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
@@ -829,6 +832,8 @@ public class MainActivity extends Activity {
             openModule("customers");
         } else if ("ثبت هزینه".equals(title)) {
             openModule("expenses");
+        } else if ("انبار و موجودی".equals(title)) {
+            startActivity(new Intent(this, InventoryActivity.class));
         } else if ("تسویه".equals(title)) {
             openModule("settlement");
         } else if ("گزارش‌ها".equals(title)) {
