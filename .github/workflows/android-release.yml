@@ -6,11 +6,11 @@ on:
       version_name:
         description: "Version name"
         required: true
-        default: "0.1.0"
+        default: "0.1.1"
       version_code:
         description: "Version code (must always increase)"
         required: true
-        default: "1"
+        default: "2"
   push:
     tags:
       - "v*"
@@ -36,6 +36,12 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+
+      - name: Validate launch activity source
+        run: |
+          set -euo pipefail
+          test -f app/src/main/java/com/hazhanhasani/traditionalcafe/MainActivity.java
+          grep -q 'public class MainActivity' app/src/main/java/com/hazhanhasani/traditionalcafe/MainActivity.java
 
       - name: Validate signing secrets
         env:
@@ -82,11 +88,19 @@ jobs:
           set -euo pipefail
           gradle --no-daemon clean :app:assembleRelease
 
-      - name: Verify APK signature
+      - name: Verify launcher class is inside APK
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
+          DEXDUMP="$ANDROID_HOME/build-tools/35.0.0/dexdump"
+          unzip -p "$APK" classes.dex > "$RUNNER_TEMP/classes.dex"
+          "$DEXDUMP" "$RUNNER_TEMP/classes.dex" | grep -F 'Class descriptor  : '\''Lcom/hazhanhasani/traditionalcafe/MainActivity;'\'''
+
+      - name: Verify APK signature
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
 
       - name: Prepare artifact
