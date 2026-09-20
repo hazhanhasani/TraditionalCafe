@@ -413,6 +413,65 @@ async function route(request, env) {
     return json({ ok: true });
   }
 
+  if (path === "/api/debug" && method === "GET") {
+    const counts = {};
+    const tables = [
+      "users",
+      "cafe_tables",
+      "orders",
+      "order_items",
+      "payments",
+      "customers",
+      "customer_ledger",
+      "expenses",
+      "hookah_catalog",
+      "service_catalog",
+      "audit_logs"
+    ];
+
+    for (const table of tables) {
+      try {
+        const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first();
+        counts[table] = Number(row?.count || 0);
+      } catch (e) {
+        counts[table] = null;
+      }
+    }
+
+    const settings = await env.DB.prepare(
+      "SELECT key, value FROM app_settings WHERE key IN ('timezone','calendar','currency') ORDER BY key"
+    ).all();
+
+    let openOrders = 0;
+    try {
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM orders WHERE status='open'"
+      ).first();
+      openOrders = Number(row?.count || 0);
+    } catch (e) {}
+
+    return json({
+      ok: true,
+      service: "TraditionalCafe API",
+      worker_version: "1.2.0",
+      database: "ready",
+      timezone: IRAN_TIME_ZONE,
+      utc_now: new Date().toISOString(),
+      iran_now: iranIsoLike(),
+      jalali_now: jalaliNowDisplay(),
+      setup_key_configured: Boolean(env.SETUP_KEY),
+      authenticated_user: {
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        role: user.role,
+      },
+      counts,
+      open_orders: openOrders,
+      settings: settings.results || [],
+    });
+  }
+
   if (path === "/api/dashboard" && method === "GET") {
     const iranToday = iranDateKey();
     const sales = await env.DB.prepare(
