@@ -16,6 +16,12 @@
             android:name=".MainActivity"
             android:exported="false" />
         <activity
+            android:name=".OperationsActivity"
+            android:exported="false" />
+        <activity
+            android:name=".OrderActivity"
+            android:exported="false" />
+        <activity
             android:name=".AuthActivity"
             android:exported="true">
             <intent-filter>

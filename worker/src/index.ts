@@ -516,7 +516,6 @@ async function route(request, env) {
 
   const settle = path.match(/^\/api\/orders\/(\d+)\/settle$/);
   if (settle && method === "POST") {
-    if (!requireRole(user, ["admin","cashier"])) return error("forbidden", "Cashier access required.", 403);
     const orderId = Number(settle[1]);
     const order = await env.DB.prepare("SELECT * FROM orders WHERE id=?").bind(orderId).first();
     if (!order || order.status !== "open") return error("order_not_open", "Open order not found.", 404);
@@ -615,7 +614,6 @@ async function route(request, env) {
 
   const customerPayment = path.match(/^\/api\/customers\/(\d+)\/payment$/);
   if (customerPayment && method === "POST") {
-    if (!requireRole(user, ["admin","cashier"])) return error("forbidden", "Cashier access required.", 403);
     const customerId = Number(customerPayment[1]);
     const customer = await env.DB.prepare("SELECT id FROM customers WHERE id=? AND active=1").bind(customerId).first();
     if (!customer) return error("not_found", "Customer not found.", 404);

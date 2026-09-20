@@ -64,6 +64,12 @@ public class MainActivity extends Activity {
     private long activeDownloadId = -1L;
     private boolean downloadReceiverRegistered = false;
 
+    private TextView salesAmountView;
+    private TextView hookahMetricView;
+    private TextView debtMetricView;
+    private TextView expenseMetricView;
+    private TextView profitMetricView;
+
     private final Runnable periodicUpdateCheck = new Runnable() {
         @Override
         public void run() {
@@ -97,6 +103,13 @@ public class MainActivity extends Activity {
         window.getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         setContentView(buildScreen());
         startPeriodicUpdateChecks();
+        refreshDashboard();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refreshDashboard();
     }
 
     private void startPeriodicUpdateChecks() {
@@ -448,6 +461,7 @@ public class MainActivity extends Activity {
         card.addView(top);
 
         TextView amount = label("۰ تومان", 32, Color.WHITE, true);
+        salesAmountView = amount;
         amount.setGravity(Gravity.RIGHT);
         amount.setPadding(0, dp(8), 0, dp(12));
         card.addView(amount);
@@ -523,6 +537,10 @@ public class MainActivity extends Activity {
         card.addView(title);
 
         TextView value = label(valueText, 18, ink, true);
+        if ("قلیان امروز".equals(titleText)) hookahMetricView = value;
+        if ("طلب دفتری".equals(titleText)) debtMetricView = value;
+        if ("هزینه امروز".equals(titleText)) expenseMetricView = value;
+        if ("سود امروز".equals(titleText)) profitMetricView = value;
         value.setGravity(Gravity.RIGHT);
         value.setPadding(0, dp(4), 0, 0);
         card.addView(value);
@@ -557,7 +575,7 @@ public class MainActivity extends Activity {
         card.setPadding(dp(13), dp(14), dp(13), dp(14));
         card.setBackground(rounded(surface, 20));
         card.setElevation(dp(1));
-        card.setOnClickListener(v -> Toast.makeText(this, titleText, Toast.LENGTH_SHORT).show());
+        card.setOnClickListener(v -> openModuleForTitle(titleText));
 
         GridLayout.LayoutParams gp = new GridLayout.LayoutParams();
         gp.width = 0;
@@ -640,6 +658,7 @@ public class MainActivity extends Activity {
         GradientDrawable openBg = rounded(softTeal, 16);
         openBg.setStroke(dp(1), Color.rgb(196, 225, 222));
         open.setBackground(openBg);
+        open.setOnClickListener(v -> openModule("tables"));
         LinearLayout.LayoutParams openLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -677,6 +696,57 @@ public class MainActivity extends Activity {
         return card;
     }
 
+    private void openModuleForTitle(String title) {
+        if ("میزها".equals(title)) {
+            openModule("tables");
+        } else if ("ثبت قلیان".equals(title)) {
+            openModule("hookah");
+        } else if ("حساب دفتری".equals(title)) {
+            openModule("customers");
+        } else if ("ثبت هزینه".equals(title)) {
+            openModule("expenses");
+        } else if ("تسویه".equals(title)) {
+            openModule("settlement");
+        } else if ("گزارش‌ها".equals(title)) {
+            openModule("reports");
+        }
+    }
+
+    private void openModule(String module) {
+        Intent intent = new Intent(this, OperationsActivity.class);
+        intent.putExtra("module", module);
+        startActivity(intent);
+    }
+
+    private void refreshDashboard() {
+        String token = getSharedPreferences("session", MODE_PRIVATE).getString("token", "");
+        if (token == null || token.isEmpty()) return;
+
+        new Thread(() -> {
+            try {
+                JSONObject data = ApiClient.get(this, "/api/dashboard");
+                long sales = data.optLong("sales_today", 0L);
+                long hookahs = data.optLong("hookahs_today", 0L);
+                long debt = data.optLong("total_customer_debt", 0L);
+                long expenses = data.optLong("expenses_today", 0L);
+                long profit = data.optLong("net_profit_today", 0L);
+
+                runOnUiThread(() -> {
+                    if (salesAmountView != null) salesAmountView.setText(formatMoney(sales));
+                    if (hookahMetricView != null) hookahMetricView.setText(String.valueOf(hookahs));
+                    if (debtMetricView != null) debtMetricView.setText(formatMoney(debt));
+                    if (expenseMetricView != null) expenseMetricView.setText(formatMoney(expenses));
+                    if (profitMetricView != null) profitMetricView.setText(formatMoney(profit));
+                });
+            } catch (Exception ignored) {
+            }
+        }).start();
+    }
+
+    private String formatMoney(long amount) {
+        return String.format(java.util.Locale.US, "%,d تومان", amount);
+    }
+
     private View buildBottomNav() {
         LinearLayout nav = new LinearLayout(this);
         nav.setOrientation(LinearLayout.HORIZONTAL);
@@ -709,7 +779,12 @@ public class MainActivity extends Activity {
         text.setPadding(0, dp(4), 0, 0);
         item.addView(text);
 
-        item.setOnClickListener(v -> Toast.makeText(this, title, Toast.LENGTH_SHORT).show());
+        item.setOnClickListener(v -> {
+            if ("خانه".equals(title)) return;
+            if ("میزها".equals(title)) openModule("tables");
+            else if ("دفتر".equals(title)) openModule("customers");
+            else if ("گزارش".equals(title)) openModule("reports");
+        });
         return item;
     }
 
