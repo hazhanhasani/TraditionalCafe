@@ -415,6 +415,9 @@ async function route(request, env) {
   }
 
   if (path === "/api/debug" && method === "GET") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "این بخش فقط برای مدیر قابل دسترسی است.", 403);
+    }
     const counts = {};
     const tables = [
       "users",
@@ -475,47 +478,101 @@ async function route(request, env) {
 
   if (path === "/api/dashboard" && method === "GET") {
     const iranToday = iranDateKey();
+
+    if (user.role === "staff") {
+      const sales = await env.DB.prepare(
+        `SELECT COALESCE(SUM(total),0) AS sales, COUNT(*) AS orders
+         FROM orders
+         WHERE status='settled' AND opened_by=?
+         AND date(closed_at,'+3 hours','+30 minutes') = date(?)`
+      ).bind(user.id, iranToday).first();
+
+      const hookahs = await env.DB.prepare(
+        `SELECT COALESCE(SUM(oi.qty),0) AS count
+         FROM order_items oi
+         JOIN orders o ON o.id=oi.order_id
+         WHERE oi.item_type='hookah' AND o.opened_by=?
+         AND date(oi.created_at,'+3 hours','+30 minutes') = date(?)`
+      ).bind(user.id, iranToday).first();
+
+      const payMethods = await env.DB.prepare(
+        `SELECT p.method, COALESCE(SUM(p.amount),0) AS amount
+         FROM payments p
+         JOIN orders o ON o.id=p.order_id
+         WHERE o.opened_by=?
+         AND date(p.created_at,'+3 hours','+30 minutes') = date(?)
+         GROUP BY p.method`
+      ).bind(user.id, iranToday).all();
+
+      const credit = await env.DB.prepare(
+        `SELECT COALESCE(SUM(p.amount),0) AS amount
+         FROM payments p
+         JOIN orders o ON o.id=p.order_id
+         WHERE o.opened_by=? AND p.method='credit'
+         AND date(p.created_at,'+3 hours','+30 minutes') = date(?)`
+      ).bind(user.id, iranToday).first();
+
+      const openOrders = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM orders WHERE opened_by=? AND status='open'"
+      ).bind(user.id).first();
+
+      return json({
+        ok: true,
+        scope: "self",
+        sales_today: Number(sales?.sales || 0),
+        settled_orders_today: Number(sales?.orders || 0),
+        hookahs_today: Number(hookahs?.count || 0),
+        credit_today: Number(credit?.amount || 0),
+        open_orders: Number(openOrders?.count || 0),
+        payment_methods: payMethods.results || [],
+        timezone: IRAN_TIME_ZONE,
+        iran_date: iranToday,
+        jalali_now: jalaliNowDisplay(),
+      });
+    }
+
     const sales = await env.DB.prepare(
       `SELECT COALESCE(SUM(total),0) AS sales
        FROM orders
        WHERE status='settled'
-       AND date(closed_at,'+3 hours','+30 minutes') = date(?)`,
+       AND date(closed_at,'+3 hours','+30 minutes') = date(?)`
     ).bind(iranToday).first();
 
     const hookahs = await env.DB.prepare(
       `SELECT COALESCE(SUM(oi.qty),0) AS count
        FROM order_items oi JOIN orders o ON o.id=oi.order_id
        WHERE oi.item_type='hookah'
-       AND date(oi.created_at,'+3 hours','+30 minutes') = date(?)`,
+       AND date(oi.created_at,'+3 hours','+30 minutes') = date(?)`
     ).bind(iranToday).first();
 
     const expenses = await env.DB.prepare(
       `SELECT COALESCE(SUM(amount),0) AS amount
        FROM expenses
-       WHERE date(created_at,'+3 hours','+30 minutes') = date(?)`,
+       WHERE date(created_at,'+3 hours','+30 minutes') = date(?)`
     ).bind(iranToday).first();
 
     const gross = await env.DB.prepare(
       `SELECT COALESCE(SUM(oi.qty * (oi.unit_price - oi.unit_cost)),0) AS amount
        FROM order_items oi JOIN orders o ON o.id=oi.order_id
        WHERE o.status='settled'
-       AND date(o.closed_at,'+3 hours','+30 minutes') = date(?)`,
+       AND date(o.closed_at,'+3 hours','+30 minutes') = date(?)`
     ).bind(iranToday).first();
 
     const debt = await env.DB.prepare(
-      "SELECT COALESCE(SUM(amount),0) AS amount FROM customer_ledger",
+      "SELECT COALESCE(SUM(amount),0) AS amount FROM customer_ledger"
     ).first();
 
     const payMethods = await env.DB.prepare(
       `SELECT method, COALESCE(SUM(amount),0) AS amount
        FROM payments
        WHERE date(created_at,'+3 hours','+30 minutes') = date(?)
-       GROUP BY method`,
+       GROUP BY method`
     ).bind(iranToday).all();
 
     const expenseAmount = Number(expenses?.amount || 0);
     return json({
       ok: true,
+      scope: "all",
       sales_today: Number(sales?.sales || 0),
       hookahs_today: Number(hookahs?.count || 0),
       expenses_today: expenseAmount,
@@ -529,16 +586,56 @@ async function route(request, env) {
     });
   }
 
+  if (path === "/api/my-sales/today" && method === "GET") {
+    const iranToday = iranDateKey();
+    const result = await env.DB.prepare(
+      `SELECT o.id, o.total, o.discount, o.closed_at, t.name AS table_name,
+              COALESCE(SUM(CASE WHEN p.method='credit' THEN p.amount ELSE 0 END),0) AS credit_amount
+       FROM orders o
+       JOIN cafe_tables t ON t.id=o.table_id
+       LEFT JOIN payments p ON p.order_id=o.id
+       WHERE o.opened_by=? AND o.status='settled'
+       AND date(o.closed_at,'+3 hours','+30 minutes') = date(?)
+       GROUP BY o.id
+       ORDER BY o.closed_at DESC`
+    ).bind(user.id, iranToday).all();
+
+    return json({
+      ok: true,
+      scope: "self",
+      iran_date: iranToday,
+      sales: result.results || [],
+    });
+  }
+
   if (path === "/api/tables" && method === "GET") {
+    if (user.role === "staff") {
+      const result = await env.DB.prepare(
+        `SELECT t.id, t.name, t.sort_order, t.active,
+                CASE WHEN o.id IS NULL THEN 0 ELSE 1 END AS busy,
+                CASE WHEN o.opened_by=? THEN 1 ELSE 0 END AS mine,
+                CASE WHEN o.opened_by=? THEN o.id ELSE NULL END AS order_id,
+                CASE WHEN o.opened_by=? THEN o.total ELSE 0 END AS total,
+                CASE WHEN o.opened_by=? THEN o.opened_at ELSE NULL END AS opened_at
+         FROM cafe_tables t
+         LEFT JOIN orders o ON o.table_id=t.id AND o.status='open'
+         WHERE t.active=1
+         ORDER BY t.sort_order, t.id`
+      ).bind(user.id, user.id, user.id, user.id).all();
+      return json({ ok: true, scope: "self", tables: result.results || [] });
+    }
+
     const result = await env.DB.prepare(
       `SELECT t.id, t.name, t.sort_order, t.active,
+              CASE WHEN o.id IS NULL THEN 0 ELSE 1 END AS busy,
+              1 AS mine,
               o.id AS order_id, o.subtotal, o.discount, o.total, o.opened_at
        FROM cafe_tables t
        LEFT JOIN orders o ON o.table_id=t.id AND o.status='open'
        WHERE t.active=1
-       ORDER BY t.sort_order, t.id`,
+       ORDER BY t.sort_order, t.id`
     ).all();
-    return json({ ok: true, tables: result.results || [] });
+    return json({ ok: true, scope: "all", tables: result.results || [] });
   }
 
   if (path === "/api/tables" && method === "POST") {
@@ -563,8 +660,15 @@ async function route(request, env) {
     const tableId = Number(openTable[1]);
     const table = await env.DB.prepare("SELECT id, name, active FROM cafe_tables WHERE id=?").bind(tableId).first();
     if (!table || Number(table.active) !== 1) return error("not_found", "Table not found.", 404);
-    const existing = await env.DB.prepare("SELECT id FROM orders WHERE table_id=? AND status='open'").bind(tableId).first();
-    if (existing) return error("table_busy", "This table already has an open order.", 409, { order_id: existing.id });
+    const existing = await env.DB.prepare(
+      "SELECT id, opened_by FROM orders WHERE table_id=? AND status='open'"
+    ).bind(tableId).first();
+    if (existing) {
+      if (user.role === "staff" && Number(existing.opened_by) !== Number(user.id)) {
+        return error("table_busy", "این میز توسط کاربر دیگری در حال استفاده است.", 409);
+      }
+      return json({ ok: true, order_id: existing.id, table_id: tableId, resumed: true });
+    }
 
     const data = await bodyJson(request);
     const result = await env.DB.prepare(
@@ -602,32 +706,32 @@ async function route(request, env) {
 
   if (path === "/api/catalog" && method === "GET") {
     const type = String(url.searchParams.get("type") || "").toLowerCase();
-    const includeAll = url.searchParams.get("all") === "1";
+    const privileged = requireRole(user, ["admin","cashier"]);
+    const includeAll = privileged && url.searchParams.get("all") === "1";
     const activeWhere = includeAll ? "" : " WHERE active=1";
+    const columns = privileged
+      ? "id, name, price, cost, active, created_at, updated_at"
+      : "id, name, price, active, created_at, updated_at";
 
     if (type === "hookah") {
       const result = await env.DB.prepare(
-        "SELECT id, name, price, cost, active, created_at, updated_at FROM hookah_catalog" +
-        activeWhere + " ORDER BY active DESC, name"
+        "SELECT " + columns + " FROM hookah_catalog" + activeWhere + " ORDER BY active DESC, name"
       ).all();
       return json({ ok: true, type: "hookah", items: result.results || [] });
     }
 
     if (type === "service") {
       const result = await env.DB.prepare(
-        "SELECT id, name, price, cost, active, created_at, updated_at FROM service_catalog" +
-        activeWhere + " ORDER BY active DESC, name"
+        "SELECT " + columns + " FROM service_catalog" + activeWhere + " ORDER BY active DESC, name"
       ).all();
       return json({ ok: true, type: "service", items: result.results || [] });
     }
 
     const hookahs = await env.DB.prepare(
-      "SELECT id, name, price, cost, active, created_at, updated_at FROM hookah_catalog" +
-      activeWhere + " ORDER BY active DESC, name"
+      "SELECT " + columns + " FROM hookah_catalog" + activeWhere + " ORDER BY active DESC, name"
     ).all();
     const services = await env.DB.prepare(
-      "SELECT id, name, price, cost, active, created_at, updated_at FROM service_catalog" +
-      activeWhere + " ORDER BY active DESC, name"
+      "SELECT " + columns + " FROM service_catalog" + activeWhere + " ORDER BY active DESC, name"
     ).all();
 
     return json({
@@ -638,6 +742,9 @@ async function route(request, env) {
   }
 
   if (path === "/api/catalog" && method === "POST") {
+    if (!requireRole(user, ["admin","cashier"])) {
+      return error("forbidden", "تعریف منو فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    }
     const data = await bodyJson(request);
     const type = String(data.type || "").toLowerCase();
     const name = String(data.name || "").trim();
@@ -667,6 +774,9 @@ async function route(request, env) {
 
   const catalogItem = path.match(/^\/api\/catalog\/(hookah|service)\/(\d+)$/);
   if (catalogItem && method === "PATCH") {
+    if (!requireRole(user, ["admin","cashier"])) {
+      return error("forbidden", "ویرایش منو فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    }
     const type = catalogItem[1];
     const id = Number(catalogItem[2]);
     const tableName = type === "hookah" ? "hookah_catalog" : "service_catalog";
@@ -702,22 +812,60 @@ async function route(request, env) {
   const orderItems = path.match(/^\/api\/orders\/(\d+)\/items$/);
   if (orderItems && method === "POST") {
     const orderId = Number(orderItems[1]);
-    const order = await env.DB.prepare("SELECT id, status FROM orders WHERE id=?").bind(orderId).first();
-    if (!order || order.status !== "open") return error("order_not_open", "Open order not found.", 404);
+    const order = await env.DB.prepare(
+      "SELECT id, status, opened_by FROM orders WHERE id=?"
+    ).bind(orderId).first();
+    if (!order || order.status !== "open") {
+      return error("order_not_open", "Open order not found.", 404);
+    }
+    if (user.role === "staff" && Number(order.opened_by) !== Number(user.id)) {
+      return error("forbidden", "شاگرد فقط می‌تواند سفارش‌های خودش را مدیریت کند.", 403);
+    }
 
     const data = await bodyJson(request);
-    const type = ["hookah","item","service"].includes(data.item_type) ? data.item_type : "item";
-    const name = String(data.name || "").trim();
     const qty = Math.max(1, Math.round(Number(data.qty || 1)));
-    const unitPrice = intAmount(data.unit_price);
-    const unitCost = intAmount(data.unit_cost || 0);
-    if (!name || unitPrice === null || unitCost === null) return error("invalid_input", "Invalid order item.");
+
+    let type;
+    let name;
+    let unitPrice;
+    let unitCost;
+
+    const catalogType = String(data.catalog_type || "").toLowerCase();
+    const catalogId = Number(data.catalog_id || 0);
+
+    if (["hookah","service"].includes(catalogType) && catalogId > 0) {
+      const catalogTable = catalogType === "hookah" ? "hookah_catalog" : "service_catalog";
+      const item = await env.DB.prepare(
+        `SELECT id, name, price, cost, active FROM ${catalogTable} WHERE id=?`
+      ).bind(catalogId).first();
+      if (!item || Number(item.active) !== 1) {
+        return error("catalog_item_not_found", "این مورد در منوی فعال پیدا نشد.", 404);
+      }
+      type = catalogType;
+      name = item.name;
+      unitPrice = Number(item.price);
+      unitCost = Number(item.cost);
+    } else {
+      if (user.role === "staff") {
+        return error("catalog_required", "شاگرد فقط می‌تواند از قلیان‌ها و خدمات تعریف‌شده فروش ثبت کند.", 403);
+      }
+      type = ["hookah","item","service"].includes(data.item_type) ? data.item_type : "item";
+      name = String(data.name || "").trim();
+      unitPrice = intAmount(data.unit_price);
+      unitCost = intAmount(data.unit_cost || 0);
+      if (!name || unitPrice === null || unitCost === null) {
+        return error("invalid_input", "Invalid order item.");
+      }
+    }
 
     const result = await env.DB.prepare(
-      "INSERT INTO order_items (order_id,item_type,name,qty,unit_price,unit_cost,created_by) VALUES (?,?,?,?,?,?,?)",
+      "INSERT INTO order_items (order_id,item_type,name,qty,unit_price,unit_cost,created_by) VALUES (?,?,?,?,?,?,?)"
     ).bind(orderId, type, name, qty, unitPrice, unitCost, user.id).run();
+
     const totals = await recalcOrder(env, orderId);
-    await audit(env, user.id, "add_order_item", "order_item", Number(result.meta.last_row_id), { order_id: orderId, name, qty });
+    await audit(env, user.id, "add_order_item", "order_item", Number(result.meta.last_row_id), {
+      order_id: orderId, name, qty
+    });
     return json({ ok: true, id: result.meta.last_row_id, totals }, 201);
   }
 
@@ -732,7 +880,16 @@ async function route(request, env) {
        WHERE o.id=?`,
     ).bind(orderId).first();
     if (!order) return error("not_found", "Order not found.", 404);
-    const items = await env.DB.prepare("SELECT * FROM order_items WHERE order_id=? ORDER BY id").bind(orderId).all();
+    if (user.role === "staff" && Number(order.opened_by) !== Number(user.id)) {
+      return error("forbidden", "شاگرد فقط می‌تواند سفارش‌های خودش را مشاهده کند.", 403);
+    }
+    const items = user.role === "staff"
+      ? await env.DB.prepare(
+          "SELECT id, order_id, item_type, name, qty, unit_price, created_by, created_at FROM order_items WHERE order_id=? ORDER BY id"
+        ).bind(orderId).all()
+      : await env.DB.prepare(
+          "SELECT * FROM order_items WHERE order_id=? ORDER BY id"
+        ).bind(orderId).all();
     const payments = await env.DB.prepare("SELECT * FROM payments WHERE order_id=? ORDER BY id").bind(orderId).all();
     return json({ ok: true, order, items: items.results || [], payments: payments.results || [] });
   }
@@ -742,10 +899,16 @@ async function route(request, env) {
     const orderId = Number(settle[1]);
     const order = await env.DB.prepare("SELECT * FROM orders WHERE id=?").bind(orderId).first();
     if (!order || order.status !== "open") return error("order_not_open", "Open order not found.", 404);
+    if (user.role === "staff" && Number(order.opened_by) !== Number(user.id)) {
+      return error("forbidden", "شاگرد فقط می‌تواند فروش خودش را تسویه کند.", 403);
+    }
 
     const data = await bodyJson(request);
     const discount = intAmount(data.discount || 0);
     if (discount === null) return error("invalid_discount", "Invalid discount.");
+    if (user.role === "staff" && discount > 0) {
+      return error("forbidden", "ثبت تخفیف فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    }
 
     await env.DB.prepare("UPDATE orders SET discount=? WHERE id=?").bind(discount, orderId).run();
     const totals = await recalcOrder(env, orderId);
@@ -851,6 +1014,9 @@ async function route(request, env) {
   }
 
   if (path === "/api/expenses" && method === "GET") {
+    if (!requireRole(user, ["admin","cashier"])) {
+      return error("forbidden", "هزینه‌ها فقط برای مدیر یا صندوق‌دار قابل مشاهده است.", 403);
+    }
     const result = await env.DB.prepare(
       `SELECT e.*, u.name AS created_by_name
        FROM expenses e JOIN users u ON u.id=e.created_by
@@ -860,6 +1026,9 @@ async function route(request, env) {
   }
 
   if (path === "/api/expenses" && method === "POST") {
+    if (!requireRole(user, ["admin","cashier"])) {
+      return error("forbidden", "ثبت هزینه فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    }
     const data = await bodyJson(request);
     const category = String(data.category || "").trim();
     const amount = intAmount(data.amount);
