@@ -14,6 +14,11 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "app/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - ".github/workflows/android-release.yml"
 
 permissions:
   contents: write
@@ -123,6 +128,19 @@ jobs:
           mkdir -p dist
           cp app/build/outputs/apk/release/app-release.apk dist/TraditionalCafe-release.apk
           sha256sum dist/TraditionalCafe-release.apk > dist/TraditionalCafe-release.apk.sha256
+
+      - name: Generate update manifest
+        run: |
+          set -euo pipefail
+          APK_SHA="$(cut -d' ' -f1 dist/TraditionalCafe-release.apk.sha256)"
+          cat > dist/update.json <<EOF
+          {
+            "version": "$APP_VERSION_NAME",
+            "versionCode": $APP_VERSION_CODE,
+            "apk_url": "https://github.com/hazhanhasani/TraditionalCafe/releases/latest/download/TraditionalCafe-release.apk",
+            "sha256": "$APK_SHA"
+          }
+          EOF
 
       - name: Publish update release
         env:

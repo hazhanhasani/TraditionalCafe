@@ -2,9 +2,18 @@ package com.hazhanhasani.traditionalcafe;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageInfo;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -44,11 +53,39 @@ public class MainActivity extends Activity {
     private final int green = Color.rgb(62, 135, 95);
     private final int divider = Color.rgb(235, 229, 220);
 
-    private static final String LATEST_RELEASE_API =
-            "https://api.github.com/repos/hazhanhasani/TraditionalCafe/releases/latest";
+    private static final String LATEST_UPDATE_MANIFEST =
+            "https://github.com/hazhanhasani/TraditionalCafe/releases/latest/download/update.json";
     private static final String LATEST_APK_FALLBACK =
             "https://github.com/hazhanhasani/TraditionalCafe/releases/latest/download/TraditionalCafe-release.apk";
-    private static final long AUTO_UPDATE_CHECK_INTERVAL_MS = 60L * 60L * 1000L;
+    private static final long AUTO_UPDATE_CHECK_INTERVAL_MS = 60L * 1000L;
+
+    private final Handler updateHandler = new Handler(Looper.getMainLooper());
+    private String promptedVersion = "";
+    private long activeDownloadId = -1L;
+    private boolean downloadReceiverRegistered = false;
+
+    private final Runnable periodicUpdateCheck = new Runnable() {
+        @Override
+        public void run() {
+            checkForUpdates(false);
+            updateHandler.postDelayed(this, AUTO_UPDATE_CHECK_INTERVAL_MS);
+        }
+    };
+
+    private final BroadcastReceiver downloadReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!DownloadManager.ACTION_DOWNLOAD_COMPLETE.equals(intent.getAction())) return;
+            long id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L);
+            if (id != activeDownloadId) return;
+
+            DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            Uri apkUri = manager.getUriForDownloadedFile(id);
+            if (apkUri != null) {
+                openInstaller(apkUri);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -59,7 +96,26 @@ public class MainActivity extends Activity {
         window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         window.getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         setContentView(buildScreen());
+        startPeriodicUpdateChecks();
+    }
+
+    private void startPeriodicUpdateChecks() {
         checkForUpdates(false);
+        updateHandler.removeCallbacks(periodicUpdateCheck);
+        updateHandler.postDelayed(periodicUpdateCheck, AUTO_UPDATE_CHECK_INTERVAL_MS);
+    }
+
+    @Override
+    protected void onDestroy() {
+        updateHandler.removeCallbacks(periodicUpdateCheck);
+        if (downloadReceiverRegistered) {
+            try {
+                unregisterReceiver(downloadReceiver);
+            } catch (Exception ignored) {
+            }
+            downloadReceiverRegistered = false;
+        }
+        super.onDestroy();
     }
 
     private void checkForUpdates(boolean force) {
@@ -74,13 +130,12 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             HttpURLConnection connection = null;
             try {
-                connection = (HttpURLConnection) new URL(LATEST_RELEASE_API).openConnection();
+                connection = (HttpURLConnection) new URL(LATEST_UPDATE_MANIFEST).openConnection();
                 connection.setConnectTimeout(8000);
                 connection.setReadTimeout(8000);
                 connection.setRequestMethod("GET");
-                connection.setRequestProperty("Accept", "application/vnd.github+json");
+                connection.setRequestProperty("Accept", "application/json");
                 connection.setRequestProperty("User-Agent", "TraditionalCafe-Android");
-                connection.setRequestProperty("X-GitHub-Api-Version", "2022-11-28");
 
                 int responseCode = connection.getResponseCode();
                 if (responseCode != HttpURLConnection.HTTP_OK) {
@@ -97,14 +152,13 @@ public class MainActivity extends Activity {
                 }
                 reader.close();
 
-                JSONObject release = new JSONObject(body.toString());
-                if (release.optBoolean("draft", false) || release.optBoolean("prerelease", false)) {
-                    return;
-                }
-
-                String remoteVersion = release.optString("tag_name", "").replaceFirst("^v", "");
+                JSONObject update = new JSONObject(body.toString());
+                String remoteVersion = update.optString("version", "");
                 String localVersion = getCurrentVersionName();
-                String apkUrl = findApkUrl(release.optJSONArray("assets"));
+                String apkUrl = update.optString("apk_url", LATEST_APK_FALLBACK);
+                if (apkUrl == null || apkUrl.trim().isEmpty()) {
+                    apkUrl = LATEST_APK_FALLBACK;
+                }
 
                 getSharedPreferences("update_state", MODE_PRIVATE)
                         .edit()
@@ -112,7 +166,11 @@ public class MainActivity extends Activity {
                         .apply();
 
                 if (isRemoteVersionNewer(remoteVersion, localVersion)) {
-                    runOnUiThread(() -> showUpdateDialog(remoteVersion, apkUrl));
+                    final String finalApkUrl = apkUrl;
+                    if (force || !remoteVersion.equals(promptedVersion)) {
+                        promptedVersion = remoteVersion;
+                        runOnUiThread(() -> showUpdateDialog(remoteVersion, finalApkUrl));
+                    }
                 } else if (force) {
                     runOnUiThread(() ->
                             Toast.makeText(this, "آخرین نسخه نصب است", Toast.LENGTH_SHORT).show()
@@ -143,22 +201,6 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
             return "0.0.0";
         }
-    }
-
-    private String findApkUrl(JSONArray assets) {
-        if (assets != null) {
-            for (int i = 0; i < assets.length(); i++) {
-                JSONObject asset = assets.optJSONObject(i);
-                if (asset == null) continue;
-
-                String name = asset.optString("name", "");
-                if (name.endsWith(".apk")) {
-                    String url = asset.optString("browser_download_url", "");
-                    if (!url.isEmpty()) return url;
-                }
-            }
-        }
-        return LATEST_APK_FALLBACK;
     }
 
     private boolean isRemoteVersionNewer(String remote, String local) {
@@ -194,20 +236,90 @@ public class MainActivity extends Activity {
                 .setTitle("بروزرسانی جدید آماده است")
                 .setMessage(
                         "نسخه " + remoteVersion + " منتشر شده است.\n\n" +
-                        "برای دریافت قابلیت‌ها و اصلاحات جدید، برنامه را بروزرسانی کنید."
+                        "بروزرسانی داخل خود برنامه دانلود می‌شود و سپس صفحه نصب Android باز خواهد شد."
                 )
-                .setPositiveButton("دانلود بروزرسانی", (dialog, which) -> openUpdateUrl(apkUrl))
+                .setPositiveButton("دانلود و نصب", (dialog, which) ->
+                        downloadUpdate(apkUrl, remoteVersion)
+                )
                 .setNegativeButton("بعداً", null)
                 .show();
     }
 
-    private void openUpdateUrl(String apkUrl) {
+    private void downloadUpdate(String apkUrl, String remoteVersion) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && !getPackageManager().canRequestPackageInstalls()) {
+            Toast.makeText(
+                    this,
+                    "برای نصب بروزرسانی، اجازه نصب از این برنامه را فعال کنید و دوباره روی بروزرسانی بزنید.",
+                    Toast.LENGTH_LONG
+            ).show();
+
+            Intent settingsIntent = new Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())
+            );
+            startActivity(settingsIntent);
+            return;
+        }
+
         try {
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl));
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(intent);
+            registerDownloadReceiverIfNeeded();
+
+            DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(apkUrl));
+            request.setTitle("بروزرسانی کافه سنتی " + remoteVersion);
+            request.setDescription("در حال دانلود نسخه جدید");
+            request.setMimeType("application/vnd.android.package-archive");
+            request.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+            );
+            request.setAllowedOverMetered(true);
+            request.setAllowedOverRoaming(false);
+            request.setDestinationInExternalPublicDir(
+                    Environment.DIRECTORY_DOWNLOADS,
+                    "TraditionalCafe-" + remoteVersion + ".apk"
+            );
+
+            activeDownloadId = manager.enqueue(request);
+            Toast.makeText(
+                    this,
+                    "دانلود بروزرسانی شروع شد.",
+                    Toast.LENGTH_SHORT
+            ).show();
         } catch (Exception error) {
-            Toast.makeText(this, "باز کردن لینک بروزرسانی ممکن نشد.", Toast.LENGTH_LONG).show();
+            Toast.makeText(
+                    this,
+                    "شروع دانلود بروزرسانی ممکن نشد.",
+                    Toast.LENGTH_LONG
+            ).show();
+        }
+    }
+
+    private void registerDownloadReceiverIfNeeded() {
+        if (downloadReceiverRegistered) return;
+
+        IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(downloadReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(downloadReceiver, filter);
+        }
+        downloadReceiverRegistered = true;
+    }
+
+    private void openInstaller(Uri apkUri) {
+        try {
+            Intent installIntent = new Intent(Intent.ACTION_VIEW);
+            installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+            installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(installIntent);
+        } catch (Exception error) {
+            Toast.makeText(
+                    this,
+                    "فایل دانلود شد؛ آن را از پوشه Downloads نصب کنید.",
+                    Toast.LENGTH_LONG
+            ).show();
         }
     }
 
