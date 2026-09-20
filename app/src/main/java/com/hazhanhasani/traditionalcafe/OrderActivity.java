@@ -46,6 +46,7 @@ public class OrderActivity extends Activity {
     private boolean autoHookah;
     private boolean autoSettle;
     private boolean autoActionShown = false;
+    private String role = "staff";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -59,6 +60,7 @@ public class OrderActivity extends Activity {
         tableName = getIntent().getStringExtra("table_name");
         autoHookah = getIntent().getBooleanExtra("auto_hookah", false);
         autoSettle = getIntent().getBooleanExtra("auto_settle", false);
+        role = getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff");
 
         setContentView(buildScreen());
         reload();
@@ -230,36 +232,45 @@ public class OrderActivity extends Activity {
 
     private void renderCatalogPicker(boolean hookah, JSONArray items) {
         int count = items == null ? 0 : items.length();
-        String[] labels = new String[count + 1];
-        labels[0] = "+ ثبت دستی";
+        boolean staff = "staff".equals(role);
+        int offset = staff ? 0 : 1;
+        String[] labels = new String[count + offset];
+
+        if (!staff) labels[0] = "+ ثبت دستی";
+
         for (int i = 0; i < count; i++) {
             JSONObject item = items.optJSONObject(i);
-            labels[i + 1] = item == null
+            labels[i + offset] = item == null
                     ? "مورد"
                     : item.optString("name", "مورد") + " • " + money(item.optLong("price", 0));
         }
 
-        new AlertDialog.Builder(this)
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
                 .setTitle(hookah ? "انتخاب قلیان" : "انتخاب خدمت")
                 .setItems(labels, (dialog, which) -> {
-                    if (which == 0) {
+                    if (!staff && which == 0) {
                         showAddItemDialog(hookah);
                         return;
                     }
-                    JSONObject item = items.optJSONObject(which - 1);
+                    int index = which - offset;
+                    JSONObject item = items == null ? null : items.optJSONObject(index);
                     if (item != null) showCatalogItemQtyDialog(hookah, item);
                 })
-                .setNeutralButton("تعریف / ویرایش منو", (dialog, which) ->
-                        startActivity(new android.content.Intent(this, CatalogActivity.class))
-                )
-                .setNegativeButton("لغو", null)
-                .show();
+                .setNegativeButton("لغو", null);
+
+        if (!staff) {
+            builder.setNeutralButton("تعریف / ویرایش منو", (dialog, which) ->
+                    startActivity(new android.content.Intent(this, CatalogActivity.class))
+            );
+        }
+
+        builder.show();
     }
 
     private void showCatalogItemQtyDialog(boolean hookah, JSONObject item) {
         String name = item.optString("name", hookah ? "قلیان" : "خدمت");
         long priceValue = item.optLong("price", 0);
-        long costValue = item.optLong("cost", 0);
+        long catalogId = item.optLong("id", 0L);
 
         LinearLayout box = dialogBox();
 
@@ -278,11 +289,9 @@ public class OrderActivity extends Activity {
                     new Thread(() -> {
                         try {
                             JSONObject body = new JSONObject();
-                            body.put("item_type", hookah ? "hookah" : "service");
-                            body.put("name", name);
+                            body.put("catalog_type", hookah ? "hookah" : "service");
+                            body.put("catalog_id", catalogId);
                             body.put("qty", Math.max(1, parseLong(qty.getText().toString())));
-                            body.put("unit_price", priceValue);
-                            body.put("unit_cost", costValue);
                             ApiClient.post(this, "/api/orders/" + orderId + "/items", body);
                             runOnUiThread(() -> {
                                 Toast.makeText(this, "به سفارش اضافه شد.", Toast.LENGTH_SHORT).show();
@@ -298,6 +307,10 @@ public class OrderActivity extends Activity {
     }
 
     private void showAddItemDialog(boolean hookah) {
+        if ("staff".equals(role)) {
+            Toast.makeText(this, "برای حساب شاگرد فقط اقلام تعریف‌شده منو قابل فروش هستند.", Toast.LENGTH_LONG).show();
+            return;
+        }
         LinearLayout box = dialogBox();
         EditText name = field(hookah ? "طعم / نام قلیان" : "نام خدمت", false);
         EditText qty = field("تعداد", false);
@@ -362,12 +375,21 @@ public class OrderActivity extends Activity {
         box.addView(totalView);
 
         EditText discount = numberField("مبلغ تخفیف", "0");
+        if ("staff".equals(role)) {
+            discount.setEnabled(false);
+            discount.setAlpha(0.55f);
+        }
         EditText cash = numberField("مبلغ نقدی", "0");
         EditText card = numberField("مبلغ کارت / کارتخوان", "0");
         EditText transfer = numberField("مبلغ کارت‌به‌کارت", "0");
         EditText credit = numberField("مبلغ نسیه", "0");
 
-        addLabeledNumberField(box, "تخفیف", "از مبلغ کل کم می‌شود", discount);
+        addLabeledNumberField(
+                box,
+                "تخفیف",
+                "staff".equals(role) ? "ثبت تخفیف فقط برای مدیر یا صندوق‌دار است" : "از مبلغ کل کم می‌شود",
+                discount
+        );
         addLabeledNumberField(box, "نقدی", "مبلغی که نقد دریافت شده", cash);
         addLabeledNumberField(box, "کارت / کارتخوان", "پرداخت با دستگاه کارتخوان", card);
         addLabeledNumberField(box, "کارت‌به‌کارت", "واریز مستقیم به کارت", transfer);
