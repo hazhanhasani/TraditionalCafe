@@ -29,6 +29,15 @@ jobs:
           grep -q '"ok":true' health.json
           grep -q '"database":"ready"' health.json
 
+      - name: Check Iran/Jalali time
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 4 --retry-delay 2 \
+            "$API_BASE/api/time" | tee time.json
+          grep -q '"timezone":"Asia/Tehran"' time.json
+          grep -q '"jalali"' time.json
+
       - name: Check setup status
         shell: bash
         run: |
