@@ -296,6 +296,32 @@ jobs:
           assert(Array.isArray(dailyReport.staff_sales), "daily report staff sales missing");
           assert(Array.isArray(dailyReport.hourly_sales), "daily report hourly sales missing");
 
+          const auditCenter = await request(
+            "/api/audit?user_id=" + setup.user.id + "&limit=100",
+            "GET",
+            null,
+            token
+          );
+          assert(auditCenter.summary && auditCenter.summary.matched_count > 0, "audit summary missing");
+          assert(Array.isArray(auditCenter.logs) && auditCenter.logs.length > 0, "audit logs missing");
+          assert(Array.isArray(auditCenter.users), "audit users filter missing");
+          assert(Array.isArray(auditCenter.actions), "audit actions filter missing");
+          assert(
+            auditCenter.logs.some(x => x.action === "customer_ledger_adjustment" && x.severity === "critical"),
+            "critical audit classification missing"
+          );
+
+          const financeAudit = await request(
+            "/api/audit?user_id=" + setup.user.id + "&category=finance&limit=100",
+            "GET",
+            null,
+            token
+          );
+          assert(
+            financeAudit.logs.every(x => x.category === "finance"),
+            "audit category filter mismatch"
+          );
+
           console.log("ORDER_MANAGEMENT_E2E_OK", {
             itemEdit: true,
             itemDelete: true,
@@ -313,7 +339,8 @@ jobs:
             customerLedger: true,
             customerAdjustments: true,
             runningBalance: true,
-            dailyReport: true
+            dailyReport: true,
+            auditCenter: true
           });
           NODE
 
