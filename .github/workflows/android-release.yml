@@ -23,6 +23,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: android-release-main
+  cancel-in-progress: true
+
 jobs:
   build-release:
     runs-on: ubuntu-latest
@@ -146,8 +150,10 @@ jobs:
           EOF
 
       - name: Publish update release
+        id: publish_release
+        continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN || github.token }}
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
@@ -165,6 +171,12 @@ jobs:
               --title "TraditionalCafe $APP_VERSION_NAME" \
               --notes "Android update • versionCode: $APP_VERSION_CODE"
           fi
+
+      - name: Release publishing status
+        if: steps.publish_release.outcome != 'success'
+        run: |
+          echo "::warning::APK build succeeded, but GitHub Release publishing was blocked."
+          echo "::warning::Repository Actions must allow write access, or add GH_RELEASE_TOKEN with Contents: write."
 
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
