@@ -282,6 +282,20 @@ jobs:
           assert(closedShift.shift.expected_cash === 95000, "closed expected cash mismatch");
           assert(closedShift.shift.cash_difference === -1000, "cash difference mismatch");
 
+          const iranTime = await request("/api/time", "GET");
+          const dailyReport = await request(
+            "/api/reports/daily?date=" + iranTime.iran_date,
+            "GET",
+            null,
+            token
+          );
+          assert(dailyReport.summary && typeof dailyReport.summary.sales === "number", "daily report summary missing");
+          assert(Array.isArray(dailyReport.payment_methods), "daily report payments missing");
+          assert(Array.isArray(dailyReport.category_sales), "daily report category sales missing");
+          assert(Array.isArray(dailyReport.top_items), "daily report top items missing");
+          assert(Array.isArray(dailyReport.staff_sales), "daily report staff sales missing");
+          assert(Array.isArray(dailyReport.hourly_sales), "daily report hourly sales missing");
+
           console.log("ORDER_MANAGEMENT_E2E_OK", {
             itemEdit: true,
             itemDelete: true,
@@ -298,7 +312,8 @@ jobs:
             partialDebtPayment: true,
             customerLedger: true,
             customerAdjustments: true,
-            runningBalance: true
+            runningBalance: true,
+            dailyReport: true
           });
           NODE
 
