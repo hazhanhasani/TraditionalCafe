@@ -875,7 +875,10 @@ public class MainActivity extends Activity {
         if (tables != null) {
             for (int i = 0; i < tables.length(); i++) {
                 JSONObject table = tables.optJSONObject(i);
-                if (table != null && table.optLong("order_id", 0L) > 0) busy++;
+                if (table != null && table.optInt(
+                        "busy",
+                        table.optLong("order_id", 0L) > 0 ? 1 : 0
+                ) == 1) busy++;
             }
         }
 
@@ -905,7 +908,10 @@ public class MainActivity extends Activity {
             JSONObject table = tables.optJSONObject(i);
             if (table == null) continue;
 
-            boolean isBusy = table.optLong("order_id", 0L) > 0;
+            boolean isBusy = table.optInt(
+                    "busy",
+                    table.optLong("order_id", 0L) > 0 ? 1 : 0
+            ) == 1;
             String name = table.optString("name", String.valueOf(i + 1));
             String shortName = name.replace("میز", "").trim();
             if (shortName.isEmpty()) shortName = String.valueOf(i + 1);
