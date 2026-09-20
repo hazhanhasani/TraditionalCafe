@@ -365,6 +365,12 @@ public class MainActivity extends Activity {
         );
     }
 
+    private boolean isAdmin() {
+        return "admin".equals(
+                getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff")
+        );
+    }
+
     private View buildScreen() {
         LinearLayout shell = new LinearLayout(this);
         shell.setOrientation(LinearLayout.VERTICAL);
@@ -648,9 +654,11 @@ public class MainActivity extends Activity {
         grid.addView(actionTile("میزها", "سفارش و وضعیت میز", R.drawable.ic_table, turquoise, softTeal));
         grid.addView(actionTile("ثبت قلیان", "ثبت سریع فروش خودم", R.drawable.ic_hookah, brown, softGold));
         grid.addView(actionTile("حساب دفتری", "نسیه و پرداخت مشتری", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
+
+        boolean allShifts = PermissionStore.has(this, "view_all_shifts");
         grid.addView(actionTile(
-                isStaff() ? "شیفت من" : "شیفت و صندوق",
-                isStaff() ? "شروع، پایان و جمع فروش خودم" : "صندوق، کسری/اضافه و شیفت کاربران",
+                allShifts ? "شیفت و صندوق" : "شیفت من",
+                allShifts ? "صندوق، کسری/اضافه و شیفت کاربران" : "شروع، پایان و جمع فروش خودم",
                 R.drawable.ic_wallet,
                 Color.rgb(44, 117, 78),
                 Color.rgb(232, 243, 235)
@@ -660,11 +668,22 @@ public class MainActivity extends Activity {
             grid.addView(actionTile("فروش‌های امروز من", "فقط فروش‌های ثبت‌شده توسط من", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
             grid.addView(actionTile("تسویه", "تسویه سفارش‌های خودم", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
         } else {
-            grid.addView(actionTile("مدیریت سفارش‌ها", "ویرایش، انتقال، لغو و اصلاح تسویه", R.drawable.ic_table, brown, softGold));
-            grid.addView(actionTile("تعریف قلیان و خدمات", "نام، قیمت فروش و هزینه", R.drawable.ic_hookah, turquoise, softTeal));
-            grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
+            if (PermissionStore.has(this, "view_all_orders")) {
+                grid.addView(actionTile("مدیریت سفارش‌ها", "ویرایش، انتقال، لغو و اصلاح تسویه", R.drawable.ic_table, brown, softGold));
+            }
+            if (PermissionStore.has(this, "manage_catalog")) {
+                grid.addView(actionTile("تعریف قلیان و خدمات", "نام، قیمت فروش و هزینه", R.drawable.ic_hookah, turquoise, softTeal));
+            }
+            if (PermissionStore.has(this, "manage_expenses")) {
+                grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
+            }
             grid.addView(actionTile("تسویه", "نقد، کارت و ترکیبی", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
-            grid.addView(actionTile("گزارش‌ها", "سود و زیان و عملکرد", R.drawable.ic_chart, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
+            if (PermissionStore.has(this, "view_reports")) {
+                grid.addView(actionTile("گزارش‌ها", "سود و زیان و عملکرد", R.drawable.ic_chart, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
+            }
+            if (isAdmin()) {
+                grid.addView(actionTile("کاربران و دسترسی‌ها", "ساخت حساب، نقش، رمز و فعالیت", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
+            }
         }
 
         return grid;
@@ -798,6 +817,8 @@ public class MainActivity extends Activity {
             openModule("hookah");
         } else if ("شیفت من".equals(title) || "شیفت و صندوق".equals(title)) {
             startActivity(new Intent(this, ShiftActivity.class));
+        } else if ("کاربران و دسترسی‌ها".equals(title)) {
+            startActivity(new Intent(this, UserManagementActivity.class));
         } else if ("فروش‌های امروز من".equals(title)) {
             openModule("my_sales");
         } else if ("مدیریت سفارش‌ها".equals(title)) {
@@ -827,6 +848,13 @@ public class MainActivity extends Activity {
 
         new Thread(() -> {
             try {
+                JSONObject me = ApiClient.get(this, "/api/me");
+                JSONObject permissions = me.optJSONObject("permissions");
+                if (permissions != null && PermissionStore.save(this, permissions)) {
+                    runOnUiThread(this::recreate);
+                    return;
+                }
+
                 JSONObject timeData = ApiClient.get(this, "/api/time");
                 JalaliDateTime.syncServerUtc(timeData.optString("utc", ""));
                 JSONObject data = ApiClient.get(this, "/api/dashboard");
