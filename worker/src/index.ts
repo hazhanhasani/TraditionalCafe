@@ -9,6 +9,7 @@ const JSON_HEADERS = {
 
 const encoder = new TextEncoder();
 const PASSWORD_KDF_ITERATIONS = 5000;
+const PASSWORD_KDF_ITERATIONS = 5000;
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
