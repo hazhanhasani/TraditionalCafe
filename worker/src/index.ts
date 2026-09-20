@@ -3544,6 +3544,229 @@ async function route(request, env) {
     return json({ ok: true, id: result.meta.last_row_id }, 201);
   }
 
+  if (path === "/api/reports/daily" && method === "GET") {
+    if (!(await hasPermission(env, user, "view_reports"))) {
+      return error("forbidden", "مجوز مشاهده گزارش‌های مدیریتی فعال نیست.", 403);
+    }
+
+    const reportDate = String(url.searchParams.get("date") || iranDateKey()).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
+      return error("invalid_date", "تاریخ گزارش معتبر نیست.");
+    }
+
+    const validDate = await env.DB.prepare("SELECT date(?) AS value").bind(reportDate).first();
+    if (!validDate?.value || validDate.value !== reportDate) {
+      return error("invalid_date", "تاریخ گزارش معتبر نیست.");
+    }
+
+    const summary = await env.DB.prepare(
+      `SELECT COALESCE(SUM(subtotal),0) AS subtotal,
+              COALESCE(SUM(discount),0) AS discounts,
+              COALESCE(SUM(total),0) AS sales,
+              COUNT(*) AS settled_orders
+       FROM orders
+       WHERE status='settled'
+         AND date(closed_at,'+3 hours','+30 minutes')=date(?)`
+    ).bind(reportDate).first();
+
+    const costs = await env.DB.prepare(
+      `SELECT COALESCE(SUM(oi.qty * oi.unit_cost),0) AS cogs,
+              COALESCE(SUM(oi.qty),0) AS sold_units
+       FROM order_items oi
+       JOIN orders o ON o.id=oi.order_id
+       WHERE o.status='settled'
+         AND date(o.closed_at,'+3 hours','+30 minutes')=date(?)`
+    ).bind(reportDate).first();
+
+    const expenses = await env.DB.prepare(
+      `SELECT COALESCE(SUM(amount),0) AS amount, COUNT(*) AS count
+       FROM expenses
+       WHERE date(created_at,'+3 hours','+30 minutes')=date(?)`
+    ).bind(reportDate).first();
+
+    const paymentMethods = await env.DB.prepare(
+      `SELECT p.method, COALESCE(SUM(p.amount),0) AS amount, COUNT(*) AS count
+       FROM payments p
+       JOIN orders o ON o.id=p.order_id
+       WHERE o.status='settled'
+         AND date(o.closed_at,'+3 hours','+30 minutes')=date(?)
+       GROUP BY p.method
+       ORDER BY CASE p.method
+         WHEN 'cash' THEN 1 WHEN 'card' THEN 2
+         WHEN 'transfer' THEN 3 ELSE 4 END`
+    ).bind(reportDate).all();
+
+    const categorySales = await env.DB.prepare(
+      `SELECT COALESCE(
+                oi.catalog_kind,
+                CASE WHEN oi.item_type='hookah' THEN 'hookah' ELSE 'service' END
+              ) AS catalog_kind,
+              COALESCE(SUM(oi.qty),0) AS qty,
+              COALESCE(SUM(oi.qty * oi.unit_price),0) AS sales_before_discount,
+              COALESCE(SUM(oi.qty * oi.unit_cost),0) AS cost
+       FROM order_items oi
+       JOIN orders o ON o.id=oi.order_id
+       WHERE o.status='settled'
+         AND date(o.closed_at,'+3 hours','+30 minutes')=date(?)
+       GROUP BY catalog_kind
+       ORDER BY sales_before_discount DESC`
+    ).bind(reportDate).all();
+
+    const topItems = await env.DB.prepare(
+      `SELECT COALESCE(
+                oi.catalog_kind,
+                CASE WHEN oi.item_type='hookah' THEN 'hookah' ELSE 'service' END
+              ) AS catalog_kind,
+              oi.name,
+              COALESCE(SUM(oi.qty),0) AS qty,
+              COALESCE(SUM(oi.qty * oi.unit_price),0) AS sales_before_discount
+       FROM order_items oi
+       JOIN orders o ON o.id=oi.order_id
+       WHERE o.status='settled'
+         AND date(o.closed_at,'+3 hours','+30 minutes')=date(?)
+       GROUP BY catalog_kind,oi.name
+       ORDER BY qty DESC,sales_before_discount DESC,oi.name
+       LIMIT 12`
+    ).bind(reportDate).all();
+
+    const staffSales = await env.DB.prepare(
+      `SELECT u.id AS user_id,u.name AS user_name,u.role,
+              COUNT(o.id) AS settled_orders,
+              COALESCE(SUM(o.total),0) AS sales,
+              COALESCE(SUM(o.discount),0) AS discounts
+       FROM orders o
+       JOIN users u ON u.id=o.opened_by
+       WHERE o.status='settled'
+         AND date(o.closed_at,'+3 hours','+30 minutes')=date(?)
+       GROUP BY u.id,u.name,u.role
+       ORDER BY sales DESC,user_name`
+    ).bind(reportDate).all();
+
+    const expenseCategories = await env.DB.prepare(
+      `SELECT category,COALESCE(SUM(amount),0) AS amount,COUNT(*) AS count
+       FROM expenses
+       WHERE date(created_at,'+3 hours','+30 minutes')=date(?)
+       GROUP BY category
+       ORDER BY amount DESC,category`
+    ).bind(reportDate).all();
+
+    const hourlySales = await env.DB.prepare(
+      `SELECT strftime('%H',closed_at,'+3 hours','+30 minutes') AS hour,
+              COUNT(*) AS orders,
+              COALESCE(SUM(total),0) AS sales
+       FROM orders
+       WHERE status='settled'
+         AND date(closed_at,'+3 hours','+30 minutes')=date(?)
+       GROUP BY hour
+       ORDER BY hour`
+    ).bind(reportDate).all();
+
+    const creditFlow = await env.DB.prepare(
+      `SELECT
+          COALESCE(SUM(CASE WHEN entry_type='debt' AND amount>0 THEN amount ELSE 0 END),0) AS credit_created,
+          COALESCE(SUM(CASE WHEN entry_type='payment' AND amount<0 THEN -amount ELSE 0 END),0) AS debt_collections,
+          COALESCE(SUM(CASE WHEN entry_type='adjustment' THEN amount ELSE 0 END),0) AS adjustments
+       FROM customer_ledger
+       WHERE date(created_at,'+3 hours','+30 minutes')=date(?)`
+    ).bind(reportDate).first();
+
+    const shifts = await env.DB.prepare(
+      `SELECT COUNT(*) AS closed_shifts,
+              COALESCE(SUM(cash_difference),0) AS cash_difference
+       FROM cash_shifts
+       WHERE status='closed'
+         AND date(closed_at,'+3 hours','+30 minutes')=date(?)`
+    ).bind(reportDate).first();
+
+    const previous = await env.DB.prepare(
+      `SELECT COALESCE(SUM(total),0) AS sales,COUNT(*) AS settled_orders
+       FROM orders
+       WHERE status='settled'
+         AND date(closed_at,'+3 hours','+30 minutes')=date(?,'-1 day')`
+    ).bind(reportDate).first();
+
+    const previousCosts = await env.DB.prepare(
+      `SELECT COALESCE(SUM(oi.qty * oi.unit_cost),0) AS cogs
+       FROM order_items oi
+       JOIN orders o ON o.id=oi.order_id
+       WHERE o.status='settled'
+         AND date(o.closed_at,'+3 hours','+30 minutes')=date(?,'-1 day')`
+    ).bind(reportDate).first();
+
+    const previousExpenses = await env.DB.prepare(
+      `SELECT COALESCE(SUM(amount),0) AS amount
+       FROM expenses
+       WHERE date(created_at,'+3 hours','+30 minutes')=date(?,'-1 day')`
+    ).bind(reportDate).first();
+
+    const previousDate = await env.DB.prepare(
+      "SELECT date(?,'-1 day') AS value"
+    ).bind(reportDate).first();
+
+    const sales = Number(summary?.sales || 0);
+    const cogs = Number(costs?.cogs || 0);
+    const expenseAmount = Number(expenses?.amount || 0);
+    const grossProfit = sales - cogs;
+    const netProfit = grossProfit - expenseAmount;
+    const settledOrders = Number(summary?.settled_orders || 0);
+
+    const previousSales = Number(previous?.sales || 0);
+    const previousNetProfit =
+      previousSales -
+      Number(previousCosts?.cogs || 0) -
+      Number(previousExpenses?.amount || 0);
+
+    return json({
+      ok:true,
+      date:reportDate,
+      timezone:IRAN_TIME_ZONE,
+      generated_at:new Date().toISOString(),
+      summary:{
+        subtotal:Number(summary?.subtotal || 0),
+        discounts:Number(summary?.discounts || 0),
+        sales,
+        settled_orders:settledOrders,
+        average_ticket:settledOrders > 0 ? Math.round(sales / settledOrders) : 0,
+        sold_units:Number(costs?.sold_units || 0),
+        cogs,
+        expenses:expenseAmount,
+        expense_count:Number(expenses?.count || 0),
+        gross_profit:grossProfit,
+        net_profit:netProfit,
+        profit_margin_percent:sales > 0
+          ? Math.round((netProfit * 10000) / sales) / 100
+          : 0
+      },
+      comparison:{
+        previous_date:previousDate?.value || null,
+        previous_sales:previousSales,
+        previous_orders:Number(previous?.settled_orders || 0),
+        previous_net_profit:previousNetProfit,
+        sales_change_percent:previousSales > 0
+          ? Math.round(((sales - previousSales) * 10000) / previousSales) / 100
+          : null,
+        net_profit_change_percent:previousNetProfit !== 0
+          ? Math.round(((netProfit - previousNetProfit) * 10000) / Math.abs(previousNetProfit)) / 100
+          : null
+      },
+      payment_methods:paymentMethods.results || [],
+      category_sales:categorySales.results || [],
+      top_items:topItems.results || [],
+      staff_sales:staffSales.results || [],
+      expense_categories:expenseCategories.results || [],
+      hourly_sales:hourlySales.results || [],
+      credit_flow:{
+        credit_created:Number(creditFlow?.credit_created || 0),
+        debt_collections:Number(creditFlow?.debt_collections || 0),
+        adjustments:Number(creditFlow?.adjustments || 0)
+      },
+      shifts:{
+        closed_shifts:Number(shifts?.closed_shifts || 0),
+        cash_difference:Number(shifts?.cash_difference || 0)
+      }
+    });
+  }
+
   if (path === "/api/reports/summary" && method === "GET") {
     if (!(await hasPermission(env, user, "view_reports"))) {
       return error("forbidden", "مجوز مشاهده گزارش‌ها فعال نیست.", 403);
