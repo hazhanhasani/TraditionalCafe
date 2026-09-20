@@ -165,9 +165,11 @@ jobs:
 
           const deletedTarget = await request("/api/orders/" + openA.order_id, "DELETE", null, token);
           assert(Number(deletedTarget.deleted_order_id) === Number(openA.order_id), "hard delete target failed");
+          assert(deletedTarget.safety_backup_id, "pre-delete backup missing for target order");
 
           const deletedSource = await request("/api/orders/" + openB.order_id, "DELETE", null, token);
           assert(Number(deletedSource.deleted_order_id) === Number(openB.order_id), "hard delete source failed");
+          assert(deletedSource.safety_backup_id, "pre-delete backup missing for source order");
 
           const customer = await request("/api/customers", "POST", {
             name: customerName,
@@ -259,7 +261,8 @@ jobs:
             "credit_limit_exceeded"
           );
 
-          await request("/api/orders/" + blockedOrder.order_id, "DELETE", null, token);
+          const deletedBlocked = await request("/api/orders/" + blockedOrder.order_id, "DELETE", null, token);
+          assert(deletedBlocked.safety_backup_id, "pre-delete backup missing for blocked order");
 
           const expenseDescription = "E2E expense " + suffix;
           await request("/api/expenses", "POST", {
@@ -295,6 +298,38 @@ jobs:
           assert(Array.isArray(dailyReport.top_items), "daily report top items missing");
           assert(Array.isArray(dailyReport.staff_sales), "daily report staff sales missing");
           assert(Array.isArray(dailyReport.hourly_sales), "daily report hourly sales missing");
+
+          const manualBackup = await request("/api/backups", "POST", {
+            reason: "e2e_backup_" + suffix
+          }, token);
+          assert(manualBackup.backup && manualBackup.backup.id, "manual backup id missing");
+          assert(manualBackup.backup.status === "ready", "manual backup not ready");
+          assert(Number(manualBackup.backup.table_count) > 0, "manual backup table count missing");
+
+          const backupList = await request("/api/backups?limit=20", "GET", null, token);
+          assert(Array.isArray(backupList.backups), "backup list missing");
+          assert(
+            backupList.backups.some(x => x.id === manualBackup.backup.id && x.status === "ready"),
+            "manual backup missing from list"
+          );
+
+          const exportedBackup = await request(
+            "/api/backups/" + manualBackup.backup.id + "/export?format=json",
+            "GET",
+            null,
+            token
+          );
+          assert(exportedBackup.format === "traditionalcafe-backup-v1", "backup JSON export format mismatch");
+          assert(exportedBackup.tables && typeof exportedBackup.tables === "object", "backup JSON tables missing");
+
+          await expectError(
+            "/api/backups/" + manualBackup.backup.id + "/restore",
+            "POST",
+            {},
+            token,
+            409,
+            "restore_confirmation_required"
+          );
 
           const auditCenter = await request(
             "/api/audit?user_id=" + created.user.id + "&limit=100",
@@ -340,8 +375,15 @@ jobs:
             customerAdjustments: true,
             runningBalance: true,
             dailyReport: true,
-            auditCenter: true
+            auditCenter: true,
+            backupRecovery: true,
+            preDeleteSnapshots: true
           });
+
+          await request("/api/backups/" + manualBackup.backup.id, "DELETE", null, token);
+          await request("/api/backups/" + deletedTarget.safety_backup_id, "DELETE", null, token);
+          await request("/api/backups/" + deletedSource.safety_backup_id, "DELETE", null, token);
+          await request("/api/backups/" + deletedBlocked.safety_backup_id, "DELETE", null, token);
           NODE
 
       - name: Cleanup test records
