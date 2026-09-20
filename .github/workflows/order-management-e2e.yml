@@ -213,6 +213,33 @@ jobs:
           );
           assert(ledgerAfterPayment.customer.balance === 15000, "partial payment balance mismatch");
 
+          await request("/api/customers/" + customer.id + "/adjustment", "POST", {
+            direction: "debt",
+            amount: 2000,
+            note: "E2E manual debt correction"
+          }, token);
+
+          await request("/api/customers/" + customer.id + "/adjustment", "POST", {
+            direction: "credit",
+            amount: 1000,
+            note: "E2E manual credit correction"
+          }, token);
+
+          const ledgerAfterAdjustment = await request(
+            "/api/customers/" + customer.id + "/ledger?full=1",
+            "GET",
+            null,
+            token
+          );
+          assert(ledgerAfterAdjustment.customer.balance === 16000, "adjustment balance mismatch");
+          assert(ledgerAfterAdjustment.statement.transaction_count >= 4, "statement summary missing");
+          assert(
+            (ledgerAfterAdjustment.entries || []).some(x =>
+              x.entry_type === "adjustment" && x.running_balance !== null
+            ),
+            "running balance missing"
+          );
+
           const blockedOrder = await request("/api/tables/" + b.id + "/open", "POST", {}, token);
           await request("/api/orders/" + blockedOrder.order_id + "/items", "POST", {
             catalog_type: "service",
@@ -269,7 +296,9 @@ jobs:
             shiftClose: true,
             creditLimit: true,
             partialDebtPayment: true,
-            customerLedger: true
+            customerLedger: true,
+            customerAdjustments: true,
+            runningBalance: true
           });
           NODE
 
