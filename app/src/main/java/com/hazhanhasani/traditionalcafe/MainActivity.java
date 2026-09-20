@@ -648,6 +648,13 @@ public class MainActivity extends Activity {
         grid.addView(actionTile("میزها", "سفارش و وضعیت میز", R.drawable.ic_table, turquoise, softTeal));
         grid.addView(actionTile("ثبت قلیان", "ثبت سریع فروش خودم", R.drawable.ic_hookah, brown, softGold));
         grid.addView(actionTile("حساب دفتری", "نسیه و پرداخت مشتری", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
+        grid.addView(actionTile(
+                isStaff() ? "شیفت من" : "شیفت و صندوق",
+                isStaff() ? "شروع، پایان و جمع فروش خودم" : "صندوق، کسری/اضافه و شیفت کاربران",
+                R.drawable.ic_wallet,
+                Color.rgb(44, 117, 78),
+                Color.rgb(232, 243, 235)
+        ));
 
         if (isStaff()) {
             grid.addView(actionTile("فروش‌های امروز من", "فقط فروش‌های ثبت‌شده توسط من", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
@@ -789,6 +796,8 @@ public class MainActivity extends Activity {
             openModule("tables");
         } else if ("ثبت قلیان".equals(title)) {
             openModule("hookah");
+        } else if ("شیفت من".equals(title) || "شیفت و صندوق".equals(title)) {
+            startActivity(new Intent(this, ShiftActivity.class));
         } else if ("فروش‌های امروز من".equals(title)) {
             openModule("my_sales");
         } else if ("مدیریت سفارش‌ها".equals(title)) {

@@ -152,6 +152,74 @@ async function audit(env, userId, action, entityType = null, entityId = null, de
   }
 }
 
+async function getOpenShift(env, userId) {
+  return await env.DB.prepare(
+    "SELECT * FROM cash_shifts WHERE user_id=? AND status='open' ORDER BY id DESC LIMIT 1"
+  ).bind(userId).first();
+}
+
+async function buildShiftSummary(env, shift) {
+  if (!shift) return null;
+
+  const payments = await env.DB.prepare(
+    `SELECT method, COALESCE(SUM(amount),0) AS amount
+     FROM payments
+     WHERE shift_id=?
+     GROUP BY method`
+  ).bind(shift.id).all();
+
+  const expenses = await env.DB.prepare(
+    `SELECT
+       COALESCE(SUM(amount),0) AS total,
+       COALESCE(SUM(CASE WHEN payment_method='cash' THEN amount ELSE 0 END),0) AS cash_amount
+     FROM expenses
+     WHERE shift_id=?`
+  ).bind(shift.id).first();
+
+  const orders = await env.DB.prepare(
+    `SELECT COUNT(DISTINCT order_id) AS count
+     FROM payments
+     WHERE shift_id=?`
+  ).bind(shift.id).first();
+
+  const totals = { cash: 0, card: 0, transfer: 0, credit: 0 };
+  for (const row of payments.results || []) {
+    if (Object.prototype.hasOwnProperty.call(totals, row.method)) {
+      totals[row.method] = Number(row.amount || 0);
+    }
+  }
+
+  const salesTotal = totals.cash + totals.card + totals.transfer + totals.credit;
+  const cashExpenses = Number(expenses?.cash_amount || 0);
+  const expectedCash = Number(shift.opening_cash || 0) + totals.cash - cashExpenses;
+
+  return {
+    id: Number(shift.id),
+    user_id: Number(shift.user_id),
+    status: shift.status,
+    opening_cash: Number(shift.opening_cash || 0),
+    opened_at: shift.opened_at,
+    closed_at: shift.closed_at,
+    counted_cash: shift.counted_cash === null ? null : Number(shift.counted_cash),
+    expected_cash: shift.expected_cash === null
+      ? expectedCash
+      : Number(shift.expected_cash),
+    cash_difference: shift.cash_difference === null
+      ? null
+      : Number(shift.cash_difference),
+    closing_note: shift.closing_note || "",
+    sales_total: salesTotal,
+    cash_sales: totals.cash,
+    card_sales: totals.card,
+    transfer_sales: totals.transfer,
+    credit_sales: totals.credit,
+    expenses_total: Number(expenses?.total || 0),
+    cash_expenses: cashExpenses,
+    expected_cash_live: expectedCash,
+    settled_orders: Number(orders?.count || 0),
+  };
+}
+
 async function recalcOrder(env, orderId) {
   const totals = await env.DB.prepare(
     "SELECT COALESCE(SUM(qty * unit_price),0) AS subtotal FROM order_items WHERE order_id = ?",
@@ -340,6 +408,161 @@ async function route(request, env) {
     return json({ ok: true, user });
   }
 
+  if (path === "/api/shifts/current" && method === "GET") {
+    const shift = await getOpenShift(env, user.id);
+    return json({
+      ok: true,
+      shift: shift ? await buildShiftSummary(env, shift) : null,
+      timezone: IRAN_TIME_ZONE,
+      jalali_now: jalaliNowDisplay(),
+    });
+  }
+
+  if (path === "/api/shifts/open" && method === "POST") {
+    const existing = await getOpenShift(env, user.id);
+    if (existing) {
+      return error("shift_already_open", "برای این کاربر یک شیفت باز وجود دارد.", 409, {
+        shift_id: Number(existing.id),
+      });
+    }
+
+    const data = await bodyJson(request);
+    const openingCash = intAmount(data.opening_cash || 0);
+    if (openingCash === null) {
+      return error("invalid_opening_cash", "موجودی اولیه صندوق معتبر نیست.");
+    }
+
+    const result = await env.DB.prepare(
+      "INSERT INTO cash_shifts (user_id, opening_cash) VALUES (?,?)"
+    ).bind(user.id, openingCash).run();
+
+    const shiftId = Number(result.meta.last_row_id);
+    const shift = await env.DB.prepare(
+      "SELECT * FROM cash_shifts WHERE id=?"
+    ).bind(shiftId).first();
+
+    await audit(env, user.id, "open_shift", "cash_shift", shiftId, {
+      opening_cash: openingCash,
+    });
+
+    return json({ ok: true, shift: await buildShiftSummary(env, shift) }, 201);
+  }
+
+  if (path === "/api/shifts/my" && method === "GET") {
+    const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") || 30)));
+    const rows = await env.DB.prepare(
+      `SELECT s.*, u.name AS user_name, u.username
+       FROM cash_shifts s
+       JOIN users u ON u.id=s.user_id
+       WHERE s.user_id=?
+       ORDER BY s.id DESC
+       LIMIT ${limit}`
+    ).bind(user.id).all();
+
+    return json({ ok: true, scope: "self", shifts: rows.results || [] });
+  }
+
+  if (path === "/api/shifts" && method === "GET") {
+    if (!requireRole(user, ["admin","cashier"])) {
+      return error("forbidden", "مشاهده شیفت‌های همه کاربران فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
+    }
+
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 100)));
+    const rows = await env.DB.prepare(
+      `SELECT s.*, u.name AS user_name, u.username
+       FROM cash_shifts s
+       JOIN users u ON u.id=s.user_id
+       ORDER BY s.id DESC
+       LIMIT ${limit}`
+    ).all();
+
+    return json({ ok: true, scope: "all", shifts: rows.results || [] });
+  }
+
+  const shiftDetail = path.match(/^\/api\/shifts\/(\d+)$/);
+  if (shiftDetail && method === "GET") {
+    const shiftId = Number(shiftDetail[1]);
+    const shift = await env.DB.prepare(
+      `SELECT s.*, u.name AS user_name, u.username
+       FROM cash_shifts s
+       JOIN users u ON u.id=s.user_id
+       WHERE s.id=?`
+    ).bind(shiftId).first();
+
+    if (!shift) return error("not_found", "شیفت پیدا نشد.", 404);
+    if (user.role === "staff" && Number(shift.user_id) !== Number(user.id)) {
+      return error("forbidden", "شاگرد فقط می‌تواند شیفت خودش را مشاهده کند.", 403);
+    }
+
+    const summary = await buildShiftSummary(env, shift);
+    summary.user_name = shift.user_name;
+    summary.username = shift.username;
+    return json({ ok: true, shift: summary });
+  }
+
+  const closeShift = path.match(/^\/api\/shifts\/(\d+)\/close$/);
+  if (closeShift && method === "POST") {
+    const shiftId = Number(closeShift[1]);
+    const shift = await env.DB.prepare(
+      "SELECT * FROM cash_shifts WHERE id=?"
+    ).bind(shiftId).first();
+
+    if (!shift) return error("not_found", "شیفت پیدا نشد.", 404);
+    if (shift.status !== "open") {
+      return error("shift_closed", "این شیفت قبلاً بسته شده است.", 409);
+    }
+    if (Number(shift.user_id) !== Number(user.id)) {
+      return error("forbidden", "هر کاربر فقط می‌تواند شیفت خودش را ببندد.", 403);
+    }
+
+    const openOrders = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM orders WHERE opened_by=? AND status='open'"
+    ).bind(user.id).first();
+    if (Number(openOrders?.count || 0) > 0) {
+      return error(
+        "open_orders_exist",
+        "قبل از بستن شیفت، همه سفارش‌های باز خودت را تسویه، منتقل یا لغو کن.",
+        409,
+        { open_orders: Number(openOrders.count) }
+      );
+    }
+
+    const data = await bodyJson(request);
+    const countedCash = intAmount(data.counted_cash);
+    if (countedCash === null) {
+      return error("invalid_counted_cash", "موجودی واقعی صندوق را وارد کنید.");
+    }
+    const note = String(data.note || "").trim().slice(0, 500);
+
+    const live = await buildShiftSummary(env, shift);
+    const expectedCash = Number(live.expected_cash_live || 0);
+    const difference = countedCash - expectedCash;
+
+    await env.DB.prepare(
+      `UPDATE cash_shifts
+       SET status='closed',
+           expected_cash=?,
+           counted_cash=?,
+           cash_difference=?,
+           closing_note=?,
+           closed_at=CURRENT_TIMESTAMP
+       WHERE id=?`
+    ).bind(expectedCash, countedCash, difference, note || null, shiftId).run();
+
+    const closed = await env.DB.prepare(
+      "SELECT * FROM cash_shifts WHERE id=?"
+    ).bind(shiftId).first();
+
+    await audit(env, user.id, "close_shift", "cash_shift", shiftId, {
+      expected_cash: expectedCash,
+      counted_cash: countedCash,
+      cash_difference: difference,
+      note,
+    });
+
+    return json({ ok: true, shift: await buildShiftSummary(env, closed) });
+  }
+
   if (path === "/api/users" && method === "GET") {
     if (!requireRole(user, ["admin"])) return error("forbidden", "Admin access required.", 403);
     const result = await env.DB.prepare(
@@ -435,7 +658,8 @@ async function route(request, env) {
       "expenses",
       "hookah_catalog",
       "service_catalog",
-      "audit_logs"
+      "audit_logs",
+      "cash_shifts"
     ];
 
     for (const table of tables) {
@@ -675,10 +899,20 @@ async function route(request, env) {
       return json({ ok: true, order_id: existing.id, table_id: tableId, resumed: true });
     }
 
+    const shift = await getOpenShift(env, user.id);
+    if (!shift) {
+      return error("shift_required", "برای ثبت فروش ابتدا شیفت خود را باز کنید.", 409);
+    }
+
     const data = await bodyJson(request);
     const result = await env.DB.prepare(
-      "INSERT INTO orders (table_id, opened_by, notes) VALUES (?,?,?)",
-    ).bind(tableId, user.id, data.notes ? String(data.notes) : null).run();
+      "INSERT INTO orders (table_id, opened_by, notes, opened_shift_id) VALUES (?,?,?,?)",
+    ).bind(
+      tableId,
+      user.id,
+      data.notes ? String(data.notes) : null,
+      shift.id
+    ).run();
     await audit(env, user.id, "open_order", "order", Number(result.meta.last_row_id), { table_id: tableId });
     return json({ ok: true, order_id: result.meta.last_row_id, table_id: tableId }, 201);
   }
@@ -1177,6 +1411,7 @@ async function route(request, env) {
          SET status='open',
              discount=0,
              closed_by=NULL,
+             settled_shift_id=NULL,
              closed_at=NULL,
              cancel_reason=NULL,
              updated_at=CURRENT_TIMESTAMP
@@ -1294,6 +1529,11 @@ async function route(request, env) {
       return error("forbidden", "شاگرد فقط می‌تواند فروش خودش را تسویه کند.", 403);
     }
 
+    const shift = await getOpenShift(env, user.id);
+    if (!shift) {
+      return error("shift_required", "برای تسویه سفارش ابتدا شیفت خود را باز کنید.", 409);
+    }
+
     const data = await bodyJson(request);
     const discount = intAmount(data.discount || 0);
     if (discount === null) return error("invalid_discount", "Invalid discount.");
@@ -1330,8 +1570,8 @@ async function route(request, env) {
 
     const statements = normalized.map((p) =>
       env.DB.prepare(
-        "INSERT INTO payments (order_id,method,amount,customer_id,created_by) VALUES (?,?,?,?,?)",
-      ).bind(orderId, p.method, p.amount, p.customer_id, user.id)
+        "INSERT INTO payments (order_id,method,amount,customer_id,created_by,shift_id) VALUES (?,?,?,?,?,?)",
+      ).bind(orderId, p.method, p.amount, p.customer_id, user.id, shift.id)
     );
     if (statements.length) await env.DB.batch(statements);
 
@@ -1344,8 +1584,8 @@ async function route(request, env) {
     }
 
     await env.DB.prepare(
-      "UPDATE orders SET status='settled', closed_by=?, closed_at=CURRENT_TIMESTAMP WHERE id=?",
-    ).bind(user.id, orderId).run();
+      "UPDATE orders SET status='settled', closed_by=?, settled_shift_id=?, closed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+    ).bind(user.id, shift.id, orderId).run();
     await audit(env, user.id, "settle_order", "order", orderId, { total: totals.total, payments: normalized });
     return json({ ok: true, order_id: orderId, totals, payments: normalized });
   }
@@ -1420,14 +1660,39 @@ async function route(request, env) {
     if (!requireRole(user, ["admin","cashier"])) {
       return error("forbidden", "ثبت هزینه فقط برای مدیر یا صندوق‌دار مجاز است.", 403);
     }
+    const shift = await getOpenShift(env, user.id);
+    if (!shift) {
+      return error("shift_required", "برای ثبت هزینه ابتدا شیفت خود را باز کنید.", 409);
+    }
+
     const data = await bodyJson(request);
     const category = String(data.category || "").trim();
     const amount = intAmount(data.amount);
-    if (!category || !amount || amount <= 0) return error("invalid_input", "Category and amount are required.");
+    const paymentMethod = ["cash","card","transfer"].includes(String(data.payment_method || "cash"))
+      ? String(data.payment_method || "cash")
+      : "cash";
+
+    if (!category || !amount || amount <= 0) {
+      return error("invalid_input", "Category and amount are required.");
+    }
+
     const result = await env.DB.prepare(
-      "INSERT INTO expenses (category,amount,description,created_by) VALUES (?,?,?,?)",
-    ).bind(category, amount, data.description ? String(data.description) : null, user.id).run();
-    await audit(env, user.id, "create_expense", "expense", Number(result.meta.last_row_id), { category, amount });
+      "INSERT INTO expenses (category,amount,description,created_by,shift_id,payment_method) VALUES (?,?,?,?,?,?)",
+    ).bind(
+      category,
+      amount,
+      data.description ? String(data.description) : null,
+      user.id,
+      shift.id,
+      paymentMethod
+    ).run();
+
+    await audit(env, user.id, "create_expense", "expense", Number(result.meta.last_row_id), {
+      category,
+      amount,
+      payment_method: paymentMethod,
+      shift_id: Number(shift.id),
+    });
     return json({ ok: true, id: result.meta.last_row_id }, 201);
   }
 

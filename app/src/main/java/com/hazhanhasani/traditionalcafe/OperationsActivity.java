@@ -11,11 +11,13 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -455,6 +457,15 @@ public class OperationsActivity extends Activity {
             amount.setPadding(0, dp(5), 0, 0);
             c.addView(amount);
 
+            String method = expense.optString("payment_method", "cash");
+            String methodFa = "card".equals(method)
+                    ? "کارت / کارتخوان"
+                    : "transfer".equals(method) ? "کارت‌به‌کارت" : "نقدی";
+            TextView methodView = text("روش پرداخت: " + methodFa, 10, muted, false);
+            methodView.setGravity(Gravity.RIGHT);
+            methodView.setPadding(0, dp(4), 0, 0);
+            c.addView(methodView);
+
             String desc = expense.optString("description", "");
             if (!desc.isEmpty()) {
                 TextView d = text(desc, 11, muted, false);
@@ -480,9 +491,21 @@ public class OperationsActivity extends Activity {
         EditText amount = field("مبلغ (تومان)", false);
         amount.setInputType(InputType.TYPE_CLASS_NUMBER);
         EditText desc = field("توضیحات", false);
+
+        Spinner method = new Spinner(this);
+        String[] methods = new String[]{"نقدی", "کارت / کارتخوان", "کارت‌به‌کارت"};
+        method.setAdapter(new ArrayAdapter<>(
+                this,
+                android.R.layout.simple_spinner_dropdown_item,
+                methods
+        ));
+
         box.addView(category);
         box.addView(amount);
         box.addView(desc);
+        box.addView(method, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(52)
+        ));
 
         new AlertDialog.Builder(this)
                 .setTitle("هزینه جدید")
@@ -494,6 +517,10 @@ public class OperationsActivity extends Activity {
                             body.put("category", category.getText().toString().trim());
                             body.put("amount", parseLong(amount.getText().toString()));
                             body.put("description", desc.getText().toString().trim());
+                            String paymentMethod = method.getSelectedItemPosition() == 1
+                                    ? "card"
+                                    : method.getSelectedItemPosition() == 2 ? "transfer" : "cash";
+                            body.put("payment_method", paymentMethod);
                             ApiClient.post(this, "/api/expenses", body);
                             runOnUiThread(() -> {
                                 Toast.makeText(this, "هزینه ثبت شد.", Toast.LENGTH_SHORT).show();

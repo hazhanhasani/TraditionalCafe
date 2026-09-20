@@ -141,6 +141,7 @@ public class DebugActivity extends Activity {
             collector.add(checkApi("/api/time", "زمان سرور ایران"));
             collector.add(checkApi("/api/debug", "دیاگ بک‌اند"));
             collector.add(checkApi("/api/dashboard", "داشبورد"));
+            collector.add(checkApi("/api/shifts/current", "شیفت و صندوق"));
             collector.add(checkApi("/api/tables", "میزها"));
             collector.add(checkApi("/api/catalog?type=hookah", "کاتالوگ قلیان"));
             collector.add(checkApi("/api/catalog?type=service", "کاتالوگ خدمات"));
