@@ -12,6 +12,8 @@ on:
         required: true
         default: "2"
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -82,7 +84,7 @@ jobs:
           TC_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           TC_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           TC_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          APP_VERSION_NAME: ${{ github.event.inputs.version_name || github.ref_name }}
+          APP_VERSION_NAME: ${{ github.event.inputs.version_name || '0.1.1' }}
           APP_VERSION_CODE: ${{ github.event.inputs.version_code || github.run_number }}
         run: |
           set -euo pipefail
