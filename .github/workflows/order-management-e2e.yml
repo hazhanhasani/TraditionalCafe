@@ -297,7 +297,7 @@ jobs:
           assert(Array.isArray(dailyReport.hourly_sales), "daily report hourly sales missing");
 
           const auditCenter = await request(
-            "/api/audit?user_id=" + setup.user.id + "&limit=100",
+            "/api/audit?user_id=" + created.user.id + "&limit=100",
             "GET",
             null,
             token
@@ -312,7 +312,7 @@ jobs:
           );
 
           const financeAudit = await request(
-            "/api/audit?user_id=" + setup.user.id + "&category=finance&limit=100",
+            "/api/audit?user_id=" + created.user.id + "&category=finance&limit=100",
             "GET",
             null,
             token
