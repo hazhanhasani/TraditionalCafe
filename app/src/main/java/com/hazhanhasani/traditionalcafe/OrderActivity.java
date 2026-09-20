@@ -165,21 +165,42 @@ public class OrderActivity extends Activity {
         }
         content.addView(summary);
 
-        LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.setGravity(Gravity.CENTER);
+        if ("open".equals(status)) {
+            LinearLayout menuRow1 = new LinearLayout(this);
+            menuRow1.setOrientation(LinearLayout.HORIZONTAL);
+            menuRow1.setGravity(Gravity.CENTER);
 
-        Button addHookah = smallButton("قلیان +");
-        addHookah.setOnClickListener(v -> showCatalogPicker(true));
-        buttons.addView(addHookah, new LinearLayout.LayoutParams(0, dp(50), 1f));
+            Button addHookah = smallButton("قلیان +");
+            addHookah.setOnClickListener(v -> showCatalogPicker("hookah"));
+            menuRow1.addView(addHookah, new LinearLayout.LayoutParams(0, dp(50), 1f));
 
-        Button addItem = smallButton("خدمت +");
-        addItem.setOnClickListener(v -> showCatalogPicker(false));
-        LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(0, dp(50), 1f);
-        addLp.setMargins(dp(8), 0, 0, 0);
-        buttons.addView(addItem, addLp);
+            Button addDrink = smallButton("نوشیدنی +");
+            addDrink.setOnClickListener(v -> showCatalogPicker("drink"));
+            LinearLayout.LayoutParams drinkLp = new LinearLayout.LayoutParams(0, dp(50), 1f);
+            drinkLp.setMarginStart(dp(8));
+            menuRow1.addView(addDrink, drinkLp);
+            content.addView(menuRow1);
 
-        content.addView(buttons);
+            LinearLayout menuRow2 = new LinearLayout(this);
+            menuRow2.setOrientation(LinearLayout.HORIZONTAL);
+            menuRow2.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams menuRow2Lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            menuRow2Lp.topMargin = dp(8);
+            menuRow2.setLayoutParams(menuRow2Lp);
+
+            Button addFood = smallButton("خوراکی +");
+            addFood.setOnClickListener(v -> showCatalogPicker("food"));
+            menuRow2.addView(addFood, new LinearLayout.LayoutParams(0, dp(50), 1f));
+
+            Button addService = smallButton("خدمت +");
+            addService.setOnClickListener(v -> showCatalogPicker("service"));
+            LinearLayout.LayoutParams serviceLp = new LinearLayout.LayoutParams(0, dp(50), 1f);
+            serviceLp.setMarginStart(dp(8));
+            menuRow2.addView(addService, serviceLp);
+            content.addView(menuRow2);
+        }
 
         if ("open".equals(status)) {
             Button settle = primaryButton("تسویه سفارش");
@@ -228,7 +249,9 @@ public class OrderActivity extends Activity {
                 long qty = item.optLong("qty", 1);
                 long unit = item.optLong("unit_price", 0);
                 String itemAt = item.optString("created_at", "");
-                String metaText = JalaliDateTime.fa(String.valueOf(qty)) + " × " + money(unit) +
+                String kind = item.optString("catalog_kind", item.optString("item_type", "service"));
+                String metaText = menuTypeLabel(kind) + " • " +
+                        JalaliDateTime.fa(String.valueOf(qty)) + " × " + money(unit) +
                         (itemAt.isEmpty() ? "" : "\n" + JalaliDateTime.formatUtcCompact(itemAt));
                 TextView meta = text(metaText, 12, muted, false);
                 meta.setGravity(Gravity.RIGHT);
@@ -248,7 +271,7 @@ public class OrderActivity extends Activity {
 
         if (!autoActionShown) {
             autoActionShown = true;
-            if (autoHookah) showCatalogPicker(true);
+            if (autoHookah) showCatalogPicker("hookah");
             else if (autoSettle) prepareSettlement();
         }
     }
@@ -554,20 +577,89 @@ public class OrderActivity extends Activity {
                 .show();
     }
 
-    private void showCatalogPicker(boolean hookah) {
-        String type = hookah ? "hookah" : "service";
+    private void showCatalogPicker(String catalogType) {
         new Thread(() -> {
             try {
-                JSONObject response = ApiClient.get(this, "/api/catalog?type=" + type);
+                JSONObject response = ApiClient.get(
+                        this,
+                        "/api/catalog?type=" + catalogType
+                );
                 JSONArray items = response.optJSONArray("items");
-                runOnUiThread(() -> renderCatalogPicker(hookah, items));
+                runOnUiThread(() -> renderCatalogPicker(catalogType, items));
             } catch (Exception e) {
                 runOnUiThread(() -> showError(e.getMessage()));
             }
         }).start();
     }
 
-    private void renderCatalogPicker(boolean hookah, JSONArray items) {
+    private void renderCatalogPicker(String catalogType, JSONArray items) {
+        if (items == null || items.length() == 0) {
+            new AlertDialog.Builder(this)
+                    .setTitle(menuTypeLabel(catalogType))
+                    .setMessage("آیتم فعالی در این بخش منو تعریف نشده است.")
+                    .setPositiveButton("باشه", null)
+                    .setNeutralButton(
+                            "مدیریت منو",
+                            (d,w) -> {
+                                if (!"staff".equals(role)) {
+                                    startActivity(new Intent(this, CatalogActivity.class));
+                                }
+                            }
+                    )
+                    .show();
+            return;
+        }
+
+        List<Long> categoryIds = new ArrayList<>();
+        List<String> categoryNames = new ArrayList<>();
+
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) continue;
+            long categoryId = item.optLong("category_id", 0L);
+            String categoryName = item.optString("category_name", "").trim();
+            if (categoryName.isEmpty()) categoryName = "بدون دسته‌بندی";
+
+            if (!categoryIds.contains(categoryId)) {
+                categoryIds.add(categoryId);
+                categoryNames.add(categoryName);
+            }
+        }
+
+        if (categoryIds.size() <= 1) {
+            renderCatalogItems(catalogType, items);
+            return;
+        }
+
+        String[] labels = new String[categoryNames.size() + 1];
+        labels[0] = "همه " + menuTypeLabel(catalogType) + "‌ها";
+        for (int i = 0; i < categoryNames.size(); i++) {
+            labels[i + 1] = categoryNames.get(i);
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("انتخاب دسته‌بندی " + menuTypeLabel(catalogType))
+                .setItems(labels, (dialog, which) -> {
+                    if (which == 0) {
+                        renderCatalogItems(catalogType, items);
+                        return;
+                    }
+
+                    long selectedId = categoryIds.get(which - 1);
+                    JSONArray filtered = new JSONArray();
+                    for (int i = 0; i < items.length(); i++) {
+                        JSONObject item = items.optJSONObject(i);
+                        if (item != null && item.optLong("category_id", 0L) == selectedId) {
+                            filtered.put(item);
+                        }
+                    }
+                    renderCatalogItems(catalogType, filtered);
+                })
+                .setNegativeButton("لغو", null)
+                .show();
+    }
+
+    private void renderCatalogItems(String catalogType, JSONArray items) {
         int count = items == null ? 0 : items.length();
         boolean staff = "staff".equals(role);
         int offset = staff ? 0 : 1;
@@ -577,41 +669,51 @@ public class OrderActivity extends Activity {
 
         for (int i = 0; i < count; i++) {
             JSONObject item = items.optJSONObject(i);
+            String category = item == null ? "" : item.optString("category_name", "").trim();
+            String prefix = category.isEmpty() ? "" : category + " • ";
             labels[i + offset] = item == null
                     ? "مورد"
-                    : item.optString("name", "مورد") + " • " + money(item.optLong("price", 0));
+                    : prefix + item.optString("name", "مورد") +
+                    " • " + money(item.optLong("price", 0L));
         }
 
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
-                .setTitle(hookah ? "انتخاب قلیان" : "انتخاب خدمت")
+                .setTitle("انتخاب " + menuTypeLabel(catalogType))
                 .setItems(labels, (dialog, which) -> {
                     if (!staff && which == 0) {
-                        showAddItemDialog(hookah);
+                        showAddItemDialog(catalogType);
                         return;
                     }
                     int index = which - offset;
                     JSONObject item = items == null ? null : items.optJSONObject(index);
-                    if (item != null) showCatalogItemQtyDialog(hookah, item);
+                    if (item != null) showCatalogItemQtyDialog(catalogType, item);
                 })
                 .setNegativeButton("لغو", null);
 
         if (!staff) {
-            builder.setNeutralButton("تعریف / ویرایش منو", (dialog, which) ->
-                    startActivity(new android.content.Intent(this, CatalogActivity.class))
+            builder.setNeutralButton(
+                    "مدیریت منو",
+                    (dialog, which) ->
+                            startActivity(new Intent(this, CatalogActivity.class))
             );
         }
 
         builder.show();
     }
 
-    private void showCatalogItemQtyDialog(boolean hookah, JSONObject item) {
-        String name = item.optString("name", hookah ? "قلیان" : "خدمت");
-        long priceValue = item.optLong("price", 0);
+    private void showCatalogItemQtyDialog(String catalogType, JSONObject item) {
+        String name = item.optString("name", menuTypeLabel(catalogType));
+        long priceValue = item.optLong("price", 0L);
         long catalogId = item.optLong("id", 0L);
 
         LinearLayout box = dialogBox();
 
-        TextView info = text(name + "\nقیمت: " + money(priceValue), 14, ink, true);
+        String category = item.optString("category_name", "").trim();
+        TextView info = text(
+                (category.isEmpty() ? "" : category + "\n") +
+                        name + "\nقیمت: " + money(priceValue),
+                14, ink, true
+        );
         info.setGravity(Gravity.RIGHT);
         info.setPadding(0, 0, 0, dp(10));
         box.addView(info);
@@ -620,41 +722,47 @@ public class OrderActivity extends Activity {
         box.addView(qty);
 
         new AlertDialog.Builder(this)
-                .setTitle(hookah ? "افزودن قلیان" : "افزودن خدمت")
+                .setTitle("افزودن " + menuTypeLabel(catalogType))
                 .setView(box)
-                .setPositiveButton("افزودن", (d,w) -> {
-                    new Thread(() -> {
-                        try {
-                            JSONObject body = new JSONObject();
-                            body.put("catalog_type", hookah ? "hookah" : "service");
-                            body.put("catalog_id", catalogId);
-                            body.put("qty", Math.max(1, parseLong(qty.getText().toString())));
-                            ApiClient.post(this, "/api/orders/" + orderId + "/items", body);
-                            runOnUiThread(() -> {
-                                Toast.makeText(this, "به سفارش اضافه شد.", Toast.LENGTH_SHORT).show();
-                                reload();
-                            });
-                        } catch (Exception e) {
-                            runOnUiThread(() -> showError(e.getMessage()));
-                        }
-                    }).start();
-                })
+                .setPositiveButton("افزودن", (d,w) -> new Thread(() -> {
+                    try {
+                        JSONObject body = new JSONObject();
+                        body.put("catalog_type", catalogType);
+                        body.put("catalog_id", catalogId);
+                        body.put("qty", Math.max(1, parseLong(qty.getText().toString())));
+                        ApiClient.post(this, "/api/orders/" + orderId + "/items", body);
+
+                        runOnUiThread(() -> {
+                            Toast.makeText(this, "به سفارش اضافه شد.", Toast.LENGTH_SHORT).show();
+                            reload();
+                        });
+                    } catch (Exception e) {
+                        runOnUiThread(() -> showError(e.getMessage()));
+                    }
+                }).start())
                 .setNegativeButton("لغو", null)
                 .show();
     }
 
-    private void showAddItemDialog(boolean hookah) {
+    private void showAddItemDialog(String catalogType) {
         if ("staff".equals(role)) {
-            Toast.makeText(this, "برای حساب شاگرد فقط اقلام تعریف‌شده منو قابل فروش هستند.", Toast.LENGTH_LONG).show();
+            Toast.makeText(
+                    this,
+                    "برای حساب شاگرد فقط اقلام تعریف‌شده منو قابل فروش هستند.",
+                    Toast.LENGTH_LONG
+            ).show();
             return;
         }
+
         LinearLayout box = dialogBox();
-        EditText name = field(hookah ? "طعم / نام قلیان" : "نام خدمت", false);
+        EditText name = field("نام " + menuTypeLabel(catalogType), false);
         EditText qty = field("تعداد", false);
         qty.setInputType(InputType.TYPE_CLASS_NUMBER);
         qty.setText("1");
+
         EditText price = field("قیمت واحد (تومان)", false);
         price.setInputType(InputType.TYPE_CLASS_NUMBER);
+
         EditText cost = field("هزینه تمام‌شده (اختیاری)", false);
         cost.setInputType(InputType.TYPE_CLASS_NUMBER);
 
@@ -664,29 +772,36 @@ public class OrderActivity extends Activity {
         box.addView(cost);
 
         new AlertDialog.Builder(this)
-                .setTitle(hookah ? "ثبت قلیان دستی" : "ثبت خدمت دستی")
+                .setTitle("ثبت دستی " + menuTypeLabel(catalogType))
                 .setView(box)
-                .setPositiveButton("ثبت", (d,w) -> {
-                    new Thread(() -> {
-                        try {
-                            JSONObject body = new JSONObject();
-                            body.put("item_type", hookah ? "hookah" : "service");
-                            body.put("name", name.getText().toString().trim());
-                            body.put("qty", Math.max(1, parseLong(qty.getText().toString())));
-                            body.put("unit_price", parseLong(price.getText().toString()));
-                            body.put("unit_cost", parseLong(cost.getText().toString()));
-                            ApiClient.post(this, "/api/orders/" + orderId + "/items", body);
-                            runOnUiThread(() -> {
-                                Toast.makeText(this, "ثبت شد.", Toast.LENGTH_SHORT).show();
-                                reload();
-                            });
-                        } catch (Exception e) {
-                            runOnUiThread(() -> showError(e.getMessage()));
-                        }
-                    }).start();
-                })
+                .setPositiveButton("ثبت", (d,w) -> new Thread(() -> {
+                    try {
+                        JSONObject body = new JSONObject();
+                        body.put("item_type", "hookah".equals(catalogType) ? "hookah" : "service");
+                        body.put("catalog_kind", catalogType);
+                        body.put("name", name.getText().toString().trim());
+                        body.put("qty", Math.max(1, parseLong(qty.getText().toString())));
+                        body.put("unit_price", parseLong(price.getText().toString()));
+                        body.put("unit_cost", parseLong(cost.getText().toString()));
+
+                        ApiClient.post(this, "/api/orders/" + orderId + "/items", body);
+                        runOnUiThread(() -> {
+                            Toast.makeText(this, "ثبت شد.", Toast.LENGTH_SHORT).show();
+                            reload();
+                        });
+                    } catch (Exception e) {
+                        runOnUiThread(() -> showError(e.getMessage()));
+                    }
+                }).start())
                 .setNegativeButton("لغو", null)
                 .show();
+    }
+
+    private String menuTypeLabel(String value) {
+        if ("hookah".equals(value)) return "قلیان";
+        if ("drink".equals(value)) return "نوشیدنی";
+        if ("food".equals(value)) return "خوراکی";
+        return "خدمت";
     }
 
     private void prepareSettlement() {

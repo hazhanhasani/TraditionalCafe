@@ -1672,14 +1672,19 @@ async function route(request, env) {
   }
 
   if (path === "/api/inventory-links" && method === "GET") {
-    if (!(await hasPermission(env, user, "manage_inventory"))) {
-      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    if (!(await hasPermission(env,user,"manage_inventory"))) {
+      return error("forbidden","مجوز مدیریت انبار برای این حساب فعال نیست.",403);
     }
 
     const rows = await env.DB.prepare(
-      `SELECT l.id, l.catalog_type, l.catalog_id, l.inventory_item_id,
-              l.qty_per_unit, ii.name AS inventory_name, ii.unit,
-              ii.stock_qty, ii.min_stock,
+      `SELECT l.id,
+              l.catalog_type AS storage_type,
+              CASE
+                WHEN l.catalog_type='hookah' THEN 'hookah'
+                ELSE COALESCE(s.item_kind,'service')
+              END AS catalog_type,
+              l.catalog_id,l.inventory_item_id,l.qty_per_unit,
+              ii.name AS inventory_name,ii.unit,ii.stock_qty,ii.min_stock,
               CASE
                 WHEN l.catalog_type='hookah' THEN h.name
                 ELSE s.name
@@ -1690,123 +1695,281 @@ async function route(request, env) {
          ON l.catalog_type='hookah' AND h.id=l.catalog_id
        LEFT JOIN service_catalog s
          ON l.catalog_type='service' AND s.id=l.catalog_id
-       ORDER BY l.catalog_type, catalog_name, ii.name`
+       ORDER BY catalog_type,catalog_name,ii.name`
     ).all();
 
-    return json({ ok: true, links: rows.results || [] });
+    return json({ok:true,links:rows.results || []});
   }
 
   if (path === "/api/inventory-links" && method === "POST") {
-    if (!(await hasPermission(env, user, "manage_inventory"))) {
-      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    if (!(await hasPermission(env,user,"manage_inventory"))) {
+      return error("forbidden","مجوز مدیریت انبار برای این حساب فعال نیست.",403);
     }
 
     const data = await bodyJson(request);
-    const catalogType = String(data.catalog_type || "").toLowerCase();
+    const requestedType = String(data.catalog_type || "").toLowerCase();
     const catalogId = Number(data.catalog_id || 0);
     const inventoryItemId = Number(data.inventory_item_id || 0);
     const qtyPerUnit = intAmount(data.qty_per_unit);
 
-    if (!["hookah","service"].includes(catalogType) ||
+    if (!["hookah","drink","food","service"].includes(requestedType) ||
         !catalogId || !inventoryItemId || !qtyPerUnit || qtyPerUnit <= 0) {
-      return error("invalid_link", "اتصال منو به انبار معتبر نیست.");
+      return error("invalid_link","اتصال منو به انبار معتبر نیست.");
     }
 
-    const catalogTable = catalogType === "hookah" ? "hookah_catalog" : "service_catalog";
-    const catalog = await env.DB.prepare(
-      `SELECT id,name FROM ${catalogTable} WHERE id=?`
-    ).bind(catalogId).first();
-    if (!catalog) return error("catalog_item_not_found", "آیتم منو پیدا نشد.", 404);
+    const storageType = requestedType === "hookah" ? "hookah" : "service";
+    const catalog = requestedType === "hookah"
+      ? await env.DB.prepare(
+          "SELECT id,name FROM hookah_catalog WHERE id=?"
+        ).bind(catalogId).first()
+      : await env.DB.prepare(
+          "SELECT id,name,item_kind FROM service_catalog WHERE id=? AND item_kind=?"
+        ).bind(catalogId,requestedType).first();
 
-    const inventory = await env.DB.prepare(
+    if (!catalog) return error("catalog_item_not_found","آیتم منو پیدا نشد.",404);
+
+    const inventoryItem = await env.DB.prepare(
       "SELECT id,name FROM inventory_items WHERE id=? AND active=1"
     ).bind(inventoryItemId).first();
-    if (!inventory) return error("inventory_item_not_found", "کالای فعال انبار پیدا نشد.", 404);
+    if (!inventoryItem) {
+      return error("inventory_item_not_found","کالای فعال انبار پیدا نشد.",404);
+    }
 
     try {
       const result = await env.DB.prepare(
         `INSERT INTO catalog_inventory_links
          (catalog_type,catalog_id,inventory_item_id,qty_per_unit)
          VALUES (?,?,?,?)`
-      ).bind(catalogType, catalogId, inventoryItemId, qtyPerUnit).run();
+      ).bind(storageType,catalogId,inventoryItemId,qtyPerUnit).run();
 
       const id = Number(result.meta.last_row_id);
-      const recipeCost = await refreshCatalogRecipeCost(env, catalogType, catalogId);
+      const recipeCost = await refreshCatalogRecipeCost(env,storageType,catalogId);
 
-      await audit(env, user.id, "create_inventory_link", "inventory_link", id, {
-        catalog_type: catalogType,
-        catalog_id: catalogId,
-        inventory_item_id: inventoryItemId,
-        qty_per_unit: qtyPerUnit,
-        recipe_cost: recipeCost,
+      await audit(env,user.id,"create_inventory_link","inventory_link",id,{
+        catalog_type:requestedType,
+        storage_type:storageType,
+        catalog_id:catalogId,
+        inventory_item_id:inventoryItemId,
+        qty_per_unit:qtyPerUnit,
+        recipe_cost:recipeCost
       });
 
-      return json({ ok: true, id, recipe_cost: recipeCost }, 201);
+      return json({
+        ok:true,id,catalog_type:requestedType,storage_type:storageType,
+        recipe_cost:recipeCost
+      },201);
     } catch (e) {
-      return error("link_exists", "این اتصال قبلاً تعریف شده است.", 409);
+      return error("link_exists","این اتصال قبلاً تعریف شده است.",409);
     }
   }
 
   const inventoryLink = path.match(/^\/api\/inventory-links\/(\d+)$/);
   if (inventoryLink && method === "DELETE") {
-    if (!(await hasPermission(env, user, "manage_inventory"))) {
-      return error("forbidden", "مجوز مدیریت انبار برای این حساب فعال نیست.", 403);
+    if (!(await hasPermission(env,user,"manage_inventory"))) {
+      return error("forbidden","مجوز مدیریت انبار برای این حساب فعال نیست.",403);
     }
 
     const id = Number(inventoryLink[1]);
     const link = await env.DB.prepare(
       "SELECT * FROM catalog_inventory_links WHERE id=?"
     ).bind(id).first();
-    if (!link) return error("not_found", "اتصال انبار پیدا نشد.", 404);
+    if (!link) return error("not_found","اتصال انبار پیدا نشد.",404);
 
-    await env.DB.prepare("DELETE FROM catalog_inventory_links WHERE id=?").bind(id).run();
+    await env.DB.prepare(
+      "DELETE FROM catalog_inventory_links WHERE id=?"
+    ).bind(id).run();
 
     const recipeCost = await refreshCatalogRecipeCost(
-      env, link.catalog_type, Number(link.catalog_id)
+      env,link.catalog_type,Number(link.catalog_id)
     );
 
-    await audit(env, user.id, "delete_inventory_link", "inventory_link", id, {
-      catalog_type: link.catalog_type,
-      catalog_id: Number(link.catalog_id),
-      inventory_item_id: Number(link.inventory_item_id),
+    await audit(env,user.id,"delete_inventory_link","inventory_link",id,{
+      catalog_type:link.catalog_type,
+      catalog_id:Number(link.catalog_id),
+      inventory_item_id:Number(link.inventory_item_id),
+      recipe_cost:recipeCost
     });
-    return json({ ok: true });
+
+    return json({ok:true,recipe_cost:recipeCost});
+  }
+
+  if (path === "/api/catalog-categories" && method === "GET") {
+    const section = String(url.searchParams.get("section") || "").toLowerCase();
+    if (section && !["hookah","drink","food","service"].includes(section)) {
+      return error("invalid_section", "بخش منو معتبر نیست.");
+    }
+
+    const canManageCatalog = await hasPermission(env, user, "manage_catalog");
+    const includeAll = canManageCatalog && url.searchParams.get("all") === "1";
+    const where = [];
+    const binds = [];
+
+    if (section) {
+      where.push("section=?");
+      binds.push(section);
+    }
+    if (!includeAll) where.push("active=1");
+
+    const rows = await env.DB.prepare(
+      `SELECT id,section,name,sort_order,active,created_at,updated_at
+       FROM catalog_categories
+       ${where.length ? "WHERE " + where.join(" AND ") : ""}
+       ORDER BY
+         CASE section
+           WHEN 'hookah' THEN 1
+           WHEN 'drink' THEN 2
+           WHEN 'food' THEN 3
+           ELSE 4
+         END,
+         sort_order,name`
+    ).bind(...binds).all();
+
+    return json({ ok: true, section: section || null, categories: rows.results || [] });
+  }
+
+  if (path === "/api/catalog-categories" && method === "POST") {
+    if (!(await hasPermission(env, user, "manage_catalog"))) {
+      return error("forbidden", "مجوز مدیریت منو فعال نیست.", 403);
+    }
+
+    const data = await bodyJson(request);
+    const section = String(data.section || "").toLowerCase();
+    const name = String(data.name || "").trim().slice(0, 80);
+    const sortOrderRaw = Number(data.sort_order || 0);
+    const sortOrder = Number.isFinite(sortOrderRaw) ? Math.round(sortOrderRaw) : 0;
+    const active = data.active === undefined ? 1 : (data.active ? 1 : 0);
+
+    if (!["hookah","drink","food","service"].includes(section) || !name) {
+      return error("invalid_category", "نام و بخش دسته‌بندی معتبر نیست.");
+    }
+
+    try {
+      const result = await env.DB.prepare(
+        `INSERT INTO catalog_categories
+         (section,name,sort_order,active)
+         VALUES (?,?,?,?)`
+      ).bind(section,name,sortOrder,active).run();
+
+      const id = Number(result.meta.last_row_id);
+      await audit(env,user.id,"create_catalog_category","catalog_category",id,{
+        section,name,sort_order:sortOrder,active
+      });
+
+      return json({
+        ok:true,id,section,name,sort_order:sortOrder,active
+      },201);
+    } catch (e) {
+      return error("category_exists","این دسته‌بندی قبلاً در این بخش ثبت شده است.",409);
+    }
+  }
+
+  const catalogCategory = path.match(/^\/api\/catalog-categories\/(\d+)$/);
+  if (catalogCategory && method === "PATCH") {
+    if (!(await hasPermission(env, user, "manage_catalog"))) {
+      return error("forbidden", "مجوز مدیریت منو فعال نیست.", 403);
+    }
+
+    const id = Number(catalogCategory[1]);
+    const current = await env.DB.prepare(
+      "SELECT * FROM catalog_categories WHERE id=?"
+    ).bind(id).first();
+    if (!current) return error("not_found","دسته‌بندی پیدا نشد.",404);
+
+    const data = await bodyJson(request);
+    const name = data.name === undefined
+      ? current.name
+      : String(data.name || "").trim().slice(0,80);
+    const sortRaw = data.sort_order === undefined
+      ? Number(current.sort_order || 0)
+      : Number(data.sort_order);
+    const sortOrder = Number.isFinite(sortRaw) ? Math.round(sortRaw) : Number(current.sort_order || 0);
+    const active = data.active === undefined ? Number(current.active) : (data.active ? 1 : 0);
+
+    if (!name) return error("invalid_category","نام دسته‌بندی معتبر نیست.");
+
+    try {
+      await env.DB.prepare(
+        `UPDATE catalog_categories
+         SET name=?,sort_order=?,active=?,updated_at=CURRENT_TIMESTAMP
+         WHERE id=?`
+      ).bind(name,sortOrder,active,id).run();
+
+      await audit(env,user.id,"update_catalog_category","catalog_category",id,{
+        section:current.section,name,sort_order:sortOrder,active
+      });
+
+      return json({
+        ok:true,id,section:current.section,name,sort_order:sortOrder,active
+      });
+    } catch (e) {
+      return error("category_exists","این نام دسته‌بندی قبلاً استفاده شده است.",409);
+    }
   }
 
   if (path === "/api/catalog" && method === "GET") {
     const type = String(url.searchParams.get("type") || "").toLowerCase();
-    const privileged = requireRole(user, ["admin","cashier"]);
-    const includeAll = privileged && url.searchParams.get("all") === "1";
-    const activeWhere = includeAll ? "" : " WHERE active=1";
-    const columns = privileged
-      ? "id, name, price, cost, active, created_at, updated_at"
-      : "id, name, price, active, created_at, updated_at";
-
-    if (type === "hookah") {
-      const result = await env.DB.prepare(
-        "SELECT " + columns + " FROM hookah_catalog" + activeWhere + " ORDER BY active DESC, name"
-      ).all();
-      return json({ ok: true, type: "hookah", items: result.results || [] });
+    const validTypes = ["hookah","drink","food","service"];
+    if (type && !validTypes.includes(type)) {
+      return error("invalid_type","بخش منو معتبر نیست.");
     }
 
-    if (type === "service") {
-      const result = await env.DB.prepare(
-        "SELECT " + columns + " FROM service_catalog" + activeWhere + " ORDER BY active DESC, name"
-      ).all();
-      return json({ ok: true, type: "service", items: result.results || [] });
-    }
+    const canManageCatalog = await hasPermission(env, user, "manage_catalog");
+    const includeAll = canManageCatalog && url.searchParams.get("all") === "1";
+    const includeCost = canManageCatalog;
 
-    const hookahs = await env.DB.prepare(
-      "SELECT " + columns + " FROM hookah_catalog" + activeWhere + " ORDER BY active DESC, name"
-    ).all();
-    const services = await env.DB.prepare(
-      "SELECT " + columns + " FROM service_catalog" + activeWhere + " ORDER BY active DESC, name"
-    ).all();
+    const fetchSection = async (section) => {
+      if (section === "hookah") {
+        const columns = includeCost
+          ? "h.id,h.name,h.price,h.cost,h.active,h.description,h.category_id,h.sort_order,h.created_at,h.updated_at"
+          : "h.id,h.name,h.price,h.active,h.description,h.category_id,h.sort_order,h.created_at,h.updated_at";
+
+        const rows = await env.DB.prepare(
+          `SELECT ${columns},
+                  c.name AS category_name,
+                  c.sort_order AS category_sort,
+                  c.active AS category_active
+           FROM hookah_catalog h
+           LEFT JOIN catalog_categories c ON c.id=h.category_id
+           ${includeAll
+             ? ""
+             : "WHERE h.active=1 AND (h.category_id IS NULL OR c.active=1)"}
+           ORDER BY COALESCE(c.sort_order,999999),c.name,h.sort_order,h.name`
+        ).all();
+        return rows.results || [];
+      }
+
+      const columns = includeCost
+        ? "s.id,s.name,s.price,s.cost,s.active,s.description,s.category_id,s.sort_order,s.item_kind,s.created_at,s.updated_at"
+        : "s.id,s.name,s.price,s.active,s.description,s.category_id,s.sort_order,s.item_kind,s.created_at,s.updated_at";
+
+      const rows = await env.DB.prepare(
+        `SELECT ${columns},
+                c.name AS category_name,
+                c.sort_order AS category_sort,
+                c.active AS category_active
+         FROM service_catalog s
+         LEFT JOIN catalog_categories c ON c.id=s.category_id
+         WHERE s.item_kind=?
+           ${includeAll ? "" : "AND s.active=1 AND (s.category_id IS NULL OR c.active=1)"}
+         ORDER BY COALESCE(c.sort_order,999999),c.name,s.sort_order,s.name`
+      ).bind(section).all();
+      return rows.results || [];
+    };
+
+    if (type) {
+      return json({
+        ok:true,
+        type,
+        items:await fetchSection(type)
+      });
+    }
 
     return json({
-      ok: true,
-      hookahs: hookahs.results || [],
-      services: services.results || [],
+      ok:true,
+      hookahs:await fetchSection("hookah"),
+      drinks:await fetchSection("drink"),
+      foods:await fetchSection("food"),
+      services:await fetchSection("service")
     });
   }
 
@@ -1814,67 +1977,149 @@ async function route(request, env) {
     if (!(await hasPermission(env, user, "manage_catalog"))) {
       return error("forbidden", "مجوز تعریف و ویرایش منو فعال نیست.", 403);
     }
+
     const data = await bodyJson(request);
     const type = String(data.type || "").toLowerCase();
-    const name = String(data.name || "").trim();
+    const name = String(data.name || "").trim().slice(0,100);
+    const description = String(data.description || "").trim().slice(0,500);
     const price = intAmount(data.price);
     const cost = intAmount(data.cost || 0);
+    const categoryId = Number(data.category_id || 0);
+    const sortRaw = Number(data.sort_order || 0);
+    const sortOrder = Number.isFinite(sortRaw) ? Math.round(sortRaw) : 0;
+    const active = data.active === undefined ? 1 : (data.active ? 1 : 0);
 
-    if (!["hookah","service"].includes(type)) {
-      return error("invalid_type", "نوع باید قلیان یا خدمت باشد.");
+    if (!["hookah","drink","food","service"].includes(type)) {
+      return error("invalid_type", "نوع منو باید قلیان، نوشیدنی، خوراکی یا خدمت باشد.");
     }
     if (!name || price === null || cost === null) {
       return error("invalid_input", "نام، قیمت فروش و هزینه تمام‌شده معتبر وارد کنید.");
     }
 
-    const tableName = type === "hookah" ? "hookah_catalog" : "service_catalog";
+    let categoryName = null;
+    if (categoryId > 0) {
+      const category = await env.DB.prepare(
+        "SELECT id,name FROM catalog_categories WHERE id=? AND section=?"
+      ).bind(categoryId,type).first();
+      if (!category) {
+        return error("category_mismatch","دسته‌بندی انتخاب‌شده متعلق به این بخش منو نیست.",409);
+      }
+      categoryName = category.name;
+    }
+
     try {
-      const result = await env.DB.prepare(
-        `INSERT INTO ${tableName} (name, price, cost, active) VALUES (?,?,?,1)`
-      ).bind(name, price, cost).run();
+      let result;
+      if (type === "hookah") {
+        result = await env.DB.prepare(
+          `INSERT INTO hookah_catalog
+           (name,price,cost,active,description,category_id,sort_order)
+           VALUES (?,?,?,?,?,?,?)`
+        ).bind(
+          name,price,cost,active,description || null,
+          categoryId > 0 ? categoryId : null,sortOrder
+        ).run();
+      } else {
+        result = await env.DB.prepare(
+          `INSERT INTO service_catalog
+           (name,price,cost,active,item_kind,description,category_id,sort_order)
+           VALUES (?,?,?,?,?,?,?,?)`
+        ).bind(
+          name,price,cost,active,type,description || null,
+          categoryId > 0 ? categoryId : null,sortOrder
+        ).run();
+      }
 
       const id = Number(result.meta.last_row_id);
-      await audit(env, user.id, "create_catalog_item", type, id, { name, price, cost });
-      return json({ ok: true, id, type, name, price, cost, active: 1 }, 201);
+      await audit(env,user.id,"create_catalog_item",type,id,{
+        name,price,cost,active,description,
+        category_id:categoryId || null,sort_order:sortOrder
+      });
+
+      return json({
+        ok:true,id,type,name,price,cost,active,description,
+        category_id:categoryId || null,category_name:categoryName,
+        sort_order:sortOrder
+      },201);
     } catch (e) {
-      return error("catalog_exists", "موردی با این نام قبلاً تعریف شده است.", 409);
+      return error("catalog_exists","موردی با این نام قبلاً در منو تعریف شده است.",409);
     }
   }
 
-  const catalogItem = path.match(/^\/api\/catalog\/(hookah|service)\/(\d+)$/);
+  const catalogItem = path.match(/^\/api\/catalog\/(hookah|drink|food|service)\/(\d+)$/);
   if (catalogItem && method === "PATCH") {
     if (!(await hasPermission(env, user, "manage_catalog"))) {
       return error("forbidden", "مجوز تعریف و ویرایش منو فعال نیست.", 403);
     }
+
     const type = catalogItem[1];
     const id = Number(catalogItem[2]);
     const tableName = type === "hookah" ? "hookah_catalog" : "service_catalog";
-    const current = await env.DB.prepare(
-      `SELECT id, name, price, cost, active FROM ${tableName} WHERE id=?`
-    ).bind(id).first();
-    if (!current) return error("not_found", "مورد تعریف‌شده پیدا نشد.", 404);
+
+    const current = type === "hookah"
+      ? await env.DB.prepare(
+          "SELECT id,name,price,cost,active,description,category_id,sort_order FROM hookah_catalog WHERE id=?"
+        ).bind(id).first()
+      : await env.DB.prepare(
+          `SELECT id,name,price,cost,active,description,category_id,sort_order,item_kind
+           FROM service_catalog WHERE id=? AND item_kind=?`
+        ).bind(id,type).first();
+
+    if (!current) return error("not_found","آیتم منو پیدا نشد.",404);
 
     const data = await bodyJson(request);
-    const name = data.name === undefined ? current.name : String(data.name).trim();
+    const name = data.name === undefined ? current.name : String(data.name || "").trim().slice(0,100);
+    const description = data.description === undefined
+      ? (current.description || "")
+      : String(data.description || "").trim().slice(0,500);
     const price = data.price === undefined ? Number(current.price) : intAmount(data.price);
     const cost = data.cost === undefined ? Number(current.cost) : intAmount(data.cost);
     const active = data.active === undefined ? Number(current.active) : (data.active ? 1 : 0);
+    const categoryId = data.category_id === undefined
+      ? Number(current.category_id || 0)
+      : Number(data.category_id || 0);
+    const sortRaw = data.sort_order === undefined
+      ? Number(current.sort_order || 0)
+      : Number(data.sort_order);
+    const sortOrder = Number.isFinite(sortRaw) ? Math.round(sortRaw) : Number(current.sort_order || 0);
 
     if (!name || price === null || cost === null) {
-      return error("invalid_input", "اطلاعات واردشده معتبر نیست.");
+      return error("invalid_input","اطلاعات واردشده معتبر نیست.");
+    }
+
+    let categoryName = null;
+    if (categoryId > 0) {
+      const category = await env.DB.prepare(
+        "SELECT id,name FROM catalog_categories WHERE id=? AND section=?"
+      ).bind(categoryId,type).first();
+      if (!category) {
+        return error("category_mismatch","دسته‌بندی انتخاب‌شده متعلق به این بخش منو نیست.",409);
+      }
+      categoryName = category.name;
     }
 
     try {
       await env.DB.prepare(
         `UPDATE ${tableName}
-         SET name=?, price=?, cost=?, active=?, updated_at=CURRENT_TIMESTAMP
+         SET name=?,price=?,cost=?,active=?,description=?,category_id=?,sort_order=?,
+             updated_at=CURRENT_TIMESTAMP
          WHERE id=?`
-      ).bind(name, price, cost, active, id).run();
+      ).bind(
+        name,price,cost,active,description || null,
+        categoryId > 0 ? categoryId : null,sortOrder,id
+      ).run();
 
-      await audit(env, user.id, "update_catalog_item", type, id, { name, price, cost, active });
-      return json({ ok: true, id, type, name, price, cost, active });
+      await audit(env,user.id,"update_catalog_item",type,id,{
+        name,price,cost,active,description,
+        category_id:categoryId || null,sort_order:sortOrder
+      });
+
+      return json({
+        ok:true,id,type,name,price,cost,active,description,
+        category_id:categoryId || null,category_name:categoryName,
+        sort_order:sortOrder
+      });
     } catch (e) {
-      return error("catalog_exists", "موردی با این نام قبلاً تعریف شده است.", 409);
+      return error("catalog_exists","موردی با این نام قبلاً در منو تعریف شده است.",409);
     }
   }
 
@@ -1926,63 +2171,99 @@ async function route(request, env) {
   if (orderItems && method === "POST") {
     const orderId = Number(orderItems[1]);
     const order = await env.DB.prepare(
-      "SELECT id, status, opened_by FROM orders WHERE id=?"
+      "SELECT id,status,opened_by FROM orders WHERE id=?"
     ).bind(orderId).first();
+
     if (!order || order.status !== "open") {
-      return error("order_not_open", "Open order not found.", 404);
+      return error("order_not_open","سفارش باز پیدا نشد.",404);
     }
     if (user.role === "staff" && Number(order.opened_by) !== Number(user.id)) {
-      return error("forbidden", "شاگرد فقط می‌تواند سفارش‌های خودش را مدیریت کند.", 403);
+      return error("forbidden","شاگرد فقط می‌تواند سفارش‌های خودش را مدیریت کند.",403);
     }
 
     const data = await bodyJson(request);
-    const qty = Math.max(1, Math.round(Number(data.qty || 1)));
+    const qty = Math.max(1,Math.round(Number(data.qty || 1)));
 
     let type;
+    let catalogKind;
     let name;
     let unitPrice;
     let unitCost;
 
     const catalogType = String(data.catalog_type || "").toLowerCase();
     const catalogId = Number(data.catalog_id || 0);
+    const validCatalogTypes = ["hookah","drink","food","service"];
 
-    if (["hookah","service"].includes(catalogType) && catalogId > 0) {
-      const catalogTable = catalogType === "hookah" ? "hookah_catalog" : "service_catalog";
-      const item = await env.DB.prepare(
-        `SELECT id, name, price, cost, active FROM ${catalogTable} WHERE id=?`
-      ).bind(catalogId).first();
+    if (validCatalogTypes.includes(catalogType) && catalogId > 0) {
+      const item = catalogType === "hookah"
+        ? await env.DB.prepare(
+            "SELECT id,name,price,cost,active FROM hookah_catalog WHERE id=?"
+          ).bind(catalogId).first()
+        : await env.DB.prepare(
+            `SELECT id,name,price,cost,active,item_kind
+             FROM service_catalog
+             WHERE id=? AND item_kind=?`
+          ).bind(catalogId,catalogType).first();
+
       if (!item || Number(item.active) !== 1) {
-        return error("catalog_item_not_found", "این مورد در منوی فعال پیدا نشد.", 404);
+        return error("catalog_item_not_found","این مورد در منوی فعال پیدا نشد.",404);
       }
-      type = catalogType;
+
+      type = catalogType === "hookah" ? "hookah" : "service";
+      catalogKind = catalogType;
       name = item.name;
       unitPrice = Number(item.price);
       unitCost = Number(item.cost);
     } else {
       if (user.role === "staff") {
-        return error("catalog_required", "شاگرد فقط می‌تواند از قلیان‌ها و خدمات تعریف‌شده فروش ثبت کند.", 403);
+        return error(
+          "catalog_required",
+          "شاگرد فقط می‌تواند از اقلام تعریف‌شده منو فروش ثبت کند.",
+          403
+        );
       }
-      type = ["hookah","item","service"].includes(data.item_type) ? data.item_type : "item";
+
+      const requestedKind = String(
+        data.catalog_kind || data.item_type || "service"
+      ).toLowerCase();
+
+      catalogKind = validCatalogTypes.includes(requestedKind)
+        ? requestedKind
+        : "service";
+      type = catalogKind === "hookah" ? "hookah" : "service";
       name = String(data.name || "").trim();
       unitPrice = intAmount(data.unit_price);
       unitCost = intAmount(data.unit_cost || 0);
+
       if (!name || unitPrice === null || unitCost === null) {
-        return error("invalid_input", "Invalid order item.");
+        return error("invalid_input","اطلاعات آیتم سفارش معتبر نیست.");
       }
     }
 
     const linkedCatalogId =
-      ["hookah","service"].includes(catalogType) && catalogId > 0 ? catalogId : null;
+      validCatalogTypes.includes(catalogType) && catalogId > 0
+        ? catalogId
+        : null;
 
     const result = await env.DB.prepare(
-      "INSERT INTO order_items (order_id,item_type,catalog_id,name,qty,unit_price,unit_cost,created_by) VALUES (?,?,?,?,?,?,?,?)"
-    ).bind(orderId, type, linkedCatalogId, name, qty, unitPrice, unitCost, user.id).run();
+      `INSERT INTO order_items
+       (order_id,item_type,catalog_id,catalog_kind,name,qty,unit_price,unit_cost,created_by)
+       VALUES (?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      orderId,type,linkedCatalogId,catalogKind,name,qty,unitPrice,unitCost,user.id
+    ).run();
 
-    const totals = await recalcOrder(env, orderId);
-    await audit(env, user.id, "add_order_item", "order_item", Number(result.meta.last_row_id), {
-      order_id: orderId, name, qty
+    const totals = await recalcOrder(env,orderId);
+    await audit(env,user.id,"add_order_item","order_item",Number(result.meta.last_row_id),{
+      order_id:orderId,name,qty,catalog_kind:catalogKind,catalog_id:linkedCatalogId
     });
-    return json({ ok: true, id: result.meta.last_row_id, totals }, 201);
+
+    return json({
+      ok:true,
+      id:Number(result.meta.last_row_id),
+      catalog_kind:catalogKind,
+      totals
+    },201);
   }
 
   const orderItem = path.match(/^\/api\/orders\/(\d+)\/items\/(\d+)$/);
@@ -2327,7 +2608,7 @@ async function route(request, env) {
     }
     const items = user.role === "staff"
       ? await env.DB.prepare(
-          "SELECT id, order_id, item_type, name, qty, unit_price, created_by, created_at FROM order_items WHERE order_id=? ORDER BY id"
+          "SELECT id, order_id, item_type, catalog_id, catalog_kind, name, qty, unit_price, created_by, created_at FROM order_items WHERE order_id=? ORDER BY id"
         ).bind(orderId).all()
       : await env.DB.prepare(
           "SELECT * FROM order_items WHERE order_id=? ORDER BY id"

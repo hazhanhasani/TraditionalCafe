@@ -672,7 +672,7 @@ public class MainActivity extends Activity {
                 grid.addView(actionTile("مدیریت سفارش‌ها", "ویرایش، انتقال، لغو و اصلاح تسویه", R.drawable.ic_table, brown, softGold));
             }
             if (PermissionStore.has(this, "manage_catalog")) {
-                grid.addView(actionTile("تعریف قلیان و خدمات", "نام، قیمت فروش و هزینه", R.drawable.ic_hookah, turquoise, softTeal));
+                grid.addView(actionTile("مدیریت منو", "قلیان، نوشیدنی، خوراکی، خدمات و دسته‌بندی", R.drawable.ic_hookah, turquoise, softTeal));
             }
             if (PermissionStore.has(this, "manage_expenses")) {
                 grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
@@ -826,7 +826,7 @@ public class MainActivity extends Activity {
             openModule("my_sales");
         } else if ("مدیریت سفارش‌ها".equals(title)) {
             openModule("orders");
-        } else if ("تعریف قلیان و خدمات".equals(title)) {
+        } else if ("مدیریت منو".equals(title)) {
             startActivity(new Intent(this, CatalogActivity.class));
         } else if ("حساب دفتری".equals(title)) {
             openModule("customers");

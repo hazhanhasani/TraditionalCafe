@@ -516,6 +516,8 @@ public class InventoryActivity extends Activity {
             try {
                 JSONObject inventory = ApiClient.get(this, "/api/inventory");
                 JSONObject hookahs = ApiClient.get(this, "/api/catalog?type=hookah");
+                JSONObject drinks = ApiClient.get(this, "/api/catalog?type=drink");
+                JSONObject foods = ApiClient.get(this, "/api/catalog?type=food");
                 JSONObject services = ApiClient.get(this, "/api/catalog?type=service");
                 JSONObject links = ApiClient.get(this, "/api/inventory-links");
 
@@ -524,6 +526,8 @@ public class InventoryActivity extends Activity {
                     renderLinksDialog(
                             inventory.optJSONArray("items"),
                             hookahs.optJSONArray("items"),
+                            drinks.optJSONArray("items"),
+                            foods.optJSONArray("items"),
                             services.optJSONArray("items"),
                             links.optJSONArray("links")
                     );
@@ -537,6 +541,8 @@ public class InventoryActivity extends Activity {
     private void renderLinksDialog(
             JSONArray inventory,
             JSONArray hookahs,
+            JSONArray drinks,
+            JSONArray foods,
             JSONArray services,
             JSONArray links
     ) {
@@ -551,7 +557,9 @@ public class InventoryActivity extends Activity {
         root.addView(help);
 
         Button add = primaryButton("+ اتصال جدید");
-        add.setOnClickListener(v -> showAddLinkDialog(inventory, hookahs, services));
+        add.setOnClickListener(v -> showAddLinkDialog(
+                inventory, hookahs, drinks, foods, services
+        ));
         root.addView(add, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(48)
         ));
@@ -572,8 +580,7 @@ public class InventoryActivity extends Activity {
                 if (link == null) continue;
 
                 LinearLayout card = card();
-                String typeFa = "hookah".equals(link.optString("catalog_type"))
-                        ? "قلیان" : "خدمت";
+                String typeFa = catalogTypeLabel(link.optString("catalog_type"));
 
                 TextView line = text(
                         typeFa + " «" + link.optString("catalog_name", "مورد") + "»" +
@@ -605,14 +612,15 @@ public class InventoryActivity extends Activity {
                 .show();
     }
 
-    private void showAddLinkDialog(JSONArray inventory, JSONArray hookahs, JSONArray services) {
+    private void showAddLinkDialog(
+            JSONArray inventory,
+            JSONArray hookahs,
+            JSONArray drinks,
+            JSONArray foods,
+            JSONArray services
+    ) {
         if (inventory == null || inventory.length() == 0) {
             showError("ابتدا حداقل یک کالای فعال در انبار تعریف کن.");
-            return;
-        }
-        if ((hookahs == null || hookahs.length() == 0) &&
-                (services == null || services.length() == 0)) {
-            showError("ابتدا قلیان یا خدمت تعریف کن.");
             return;
         }
 
@@ -622,7 +630,7 @@ public class InventoryActivity extends Activity {
         type.setAdapter(new ArrayAdapter<>(
                 this,
                 android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"قلیان", "خدمت"}
+                new String[]{"قلیان", "نوشیدنی", "خوراکی", "خدمت"}
         ));
 
         Spinner catalog = new Spinner(this);
@@ -641,7 +649,10 @@ public class InventoryActivity extends Activity {
         type.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                catalogRows[0] = position == 0 ? jsonList(hookahs) : jsonList(services);
+                if (position == 0) catalogRows[0] = jsonList(hookahs);
+                else if (position == 1) catalogRows[0] = jsonList(drinks);
+                else if (position == 2) catalogRows[0] = jsonList(foods);
+                else catalogRows[0] = jsonList(services);
                 setCatalogAdapter(catalog, catalogRows[0]);
             }
 
@@ -651,19 +662,15 @@ public class InventoryActivity extends Activity {
 
         EditText qty = numberField("مصرف به ازای هر فروش", "1");
 
-        TextView typeLabel = label("نوع منو");
-        TextView catalogLabel = label("آیتم فروش");
-        TextView stockLabel = label("کالای انبار");
-
-        box.addView(typeLabel);
+        box.addView(label("بخش منو"));
         box.addView(type, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(50)
         ));
-        box.addView(catalogLabel);
+        box.addView(label("آیتم فروش"));
         box.addView(catalog, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(50)
         ));
-        box.addView(stockLabel);
+        box.addView(label("کالای انبار"));
         box.addView(stock, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(50)
         ));
@@ -678,11 +685,21 @@ public class InventoryActivity extends Activity {
                             throw new IllegalStateException("در این بخش آیتم فعالی وجود ندارد.");
                         }
 
-                        JSONObject selectedCatalog = catalogRows[0].get(catalog.getSelectedItemPosition());
-                        JSONObject selectedStock = stockRows.get(stock.getSelectedItemPosition());
+                        JSONObject selectedCatalog = catalogRows[0].get(
+                                catalog.getSelectedItemPosition()
+                        );
+                        JSONObject selectedStock = stockRows.get(
+                                stock.getSelectedItemPosition()
+                        );
+
+                        String catalogType;
+                        if (type.getSelectedItemPosition() == 0) catalogType = "hookah";
+                        else if (type.getSelectedItemPosition() == 1) catalogType = "drink";
+                        else if (type.getSelectedItemPosition() == 2) catalogType = "food";
+                        else catalogType = "service";
 
                         JSONObject body = new JSONObject();
-                        body.put("catalog_type", type.getSelectedItemPosition() == 0 ? "hookah" : "service");
+                        body.put("catalog_type", catalogType);
                         body.put("catalog_id", selectedCatalog.optLong("id"));
                         body.put("inventory_item_id", selectedStock.optLong("id"));
                         body.put("qty_per_unit", parseLong(qty.getText().toString()));
@@ -690,7 +707,11 @@ public class InventoryActivity extends Activity {
                         ApiClient.post(this, "/api/inventory-links", body);
 
                         runOnUiThread(() -> {
-                            Toast.makeText(this, "اتصال فروش به انبار ثبت شد.", Toast.LENGTH_LONG).show();
+                            Toast.makeText(
+                                    this,
+                                    "اتصال فروش به انبار ثبت شد.",
+                                    Toast.LENGTH_LONG
+                            ).show();
                             showLinks();
                         });
                     } catch (Exception e) {
@@ -699,6 +720,13 @@ public class InventoryActivity extends Activity {
                 }).start())
                 .setNegativeButton("لغو", null)
                 .show();
+    }
+
+    private String catalogTypeLabel(String value) {
+        if ("hookah".equals(value)) return "قلیان";
+        if ("drink".equals(value)) return "نوشیدنی";
+        if ("food".equals(value)) return "خوراکی";
+        return "خدمت";
     }
 
     private void confirmDeleteLink(long linkId) {
