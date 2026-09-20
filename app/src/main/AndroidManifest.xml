@@ -49,6 +49,9 @@
             android:name=".AuditLogActivity"
             android:exported="false" />
         <activity
+            android:name=".BackupRecoveryActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity
