@@ -14,6 +14,7 @@ public final class JalaliDateTime {
     private static final ZoneId IRAN = ZoneId.of(IRAN_TIME_ZONE);
     private static final DateTimeFormatter SQLITE_UTC =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.US);
+    private static volatile long serverOffsetMillis = 0L;
 
     private static final String[] MONTHS = {
             "", "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
@@ -22,12 +23,29 @@ public final class JalaliDateTime {
 
     private JalaliDateTime() {}
 
+    public static void syncServerUtc(String utcIso) {
+        if (utcIso == null || utcIso.trim().isEmpty()) return;
+        try {
+            long serverMillis = Instant.parse(utcIso.trim()).toEpochMilli();
+            serverOffsetMillis = serverMillis - System.currentTimeMillis();
+        } catch (DateTimeParseException ignored) {
+        }
+    }
+
+    public static long getServerOffsetMillis() {
+        return serverOffsetMillis;
+    }
+
+    public static ZonedDateTime iranNow() {
+        return Instant.ofEpochMilli(System.currentTimeMillis() + serverOffsetMillis).atZone(IRAN);
+    }
+
     public static String nowFull() {
-        return formatIran(ZonedDateTime.now(IRAN), true);
+        return formatIran(iranNow(), true);
     }
 
     public static String today() {
-        ZonedDateTime now = ZonedDateTime.now(IRAN);
+        ZonedDateTime now = iranNow();
         int[] j = gregorianToJalali(now.getYear(), now.getMonthValue(), now.getDayOfMonth());
         return fa(j[0] + "/" + two(j[1]) + "/" + two(j[2]));
     }
