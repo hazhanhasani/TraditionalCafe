@@ -837,7 +837,7 @@ public class MainActivity extends Activity {
         } else if ("تسویه".equals(title)) {
             openModule("settlement");
         } else if ("گزارش‌ها".equals(title)) {
-            openModule("reports");
+            startActivity(new Intent(this, DailyReportActivity.class));
         }
     }
 
