@@ -171,6 +171,7 @@ jobs:
               --title "TraditionalCafe $APP_VERSION_NAME" \
               --notes "Android update • versionCode: $APP_VERSION_CODE"
           fi
+          gh release edit "$RELEASE_TAG" --latest
 
       - name: Release publishing status
         if: steps.publish_release.outcome != 'success'
