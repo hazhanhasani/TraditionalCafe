@@ -8,6 +8,7 @@ const JSON_HEADERS = {
 };
 
 const encoder = new TextEncoder();
+const PASSWORD_KDF_ITERATIONS = 5000;
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -56,7 +57,7 @@ async function hashPassword(password, saltHex) {
   );
   const salt = new Uint8Array((saltHex.match(/.{1,2}/g) || []).map((x) => parseInt(x, 16)));
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt, iterations: 180000 },
+    { name: "PBKDF2", hash: "SHA-256", salt, iterations: PASSWORD_KDF_ITERATIONS },
     key,
     256,
   );
@@ -150,6 +151,27 @@ async function route(request, env) {
     });
   }
 
+  if (path === "/api/setup/crypto-check" && method === "POST") {
+    if (!env.SETUP_KEY) return error("setup_key_missing", "SETUP_KEY Worker secret is not configured.", 503);
+    const supplied = request.headers.get("x-setup-key") || "";
+    if (supplied !== env.SETUP_KEY) return error("forbidden", "کلید راه‌اندازی معتبر نیست.", 403);
+
+    try {
+      const salt = randomHex(16);
+      const hash = await hashPassword("TraditionalCafeCryptoCheck-2026!", salt);
+      return json({
+        ok: true,
+        password_hashing: "ready",
+        algorithm: "PBKDF2-SHA256",
+        iterations: PASSWORD_KDF_ITERATIONS,
+        hash_length: hash.length,
+      });
+    } catch (e) {
+      console.error("password_hash_failed", e);
+      return error("password_hash_failed", "سامانه رمزنگاری رمز عبور در Worker آماده نیست.", 503);
+    }
+  }
+
   if ((path === "/api/bootstrap" || path === "/api/setup/user") && method === "POST") {
     if (!env.SETUP_KEY) return error("setup_key_missing", "SETUP_KEY Worker secret is not configured.", 503);
     const supplied = request.headers.get("x-setup-key") || "";
@@ -170,7 +192,14 @@ async function route(request, env) {
     }
 
     const salt = randomHex(16);
-    const passwordHash = await hashPassword(password, salt);
+    let passwordHash;
+    try {
+      passwordHash = await hashPassword(password, salt);
+    } catch (e) {
+      console.error("setup_password_hash_failed", e);
+      return error("password_hash_failed", "خطا در پردازش امن رمز عبور. دوباره تلاش کنید.", 503);
+    }
+
     try {
       const result = await env.DB.prepare(
         "INSERT INTO users (username,name,role,pin_hash,pin_salt) VALUES (?,?,?,?,?)",
@@ -207,7 +236,13 @@ async function route(request, env) {
       return error("invalid_credentials", "نام کاربری یا رمز عبور اشتباه است.", 401);
     }
 
-    const candidate = await hashPassword(password, user.pin_salt);
+    let candidate;
+    try {
+      candidate = await hashPassword(password, user.pin_salt);
+    } catch (e) {
+      console.error("login_password_hash_failed", e);
+      return error("password_hash_failed", "خطا در پردازش امن رمز عبور. دوباره تلاش کنید.", 503);
+    }
     if (candidate !== user.pin_hash) {
       return error("invalid_credentials", "نام کاربری یا رمز عبور اشتباه است.", 401);
     }
@@ -261,7 +296,13 @@ async function route(request, env) {
     if (password.length < 8 || password.length > 128) return error("invalid_password", "Password must be at least 8 characters.");
 
     const salt = randomHex(16);
-    const passwordHash = await hashPassword(password, salt);
+    let passwordHash;
+    try {
+      passwordHash = await hashPassword(password, salt);
+    } catch (e) {
+      console.error("create_user_password_hash_failed", e);
+      return error("password_hash_failed", "خطا در پردازش امن رمز عبور.", 503);
+    }
     try {
       const result = await env.DB.prepare(
         "INSERT INTO users (username,name,role,pin_hash,pin_salt) VALUES (?,?,?,?,?)",
@@ -293,7 +334,13 @@ async function route(request, env) {
       const password = String(data.password);
       if (password.length < 8 || password.length > 128) return error("invalid_password", "Password must be at least 8 characters.");
       const salt = randomHex(16);
-      const passwordHash = await hashPassword(password, salt);
+      let passwordHash;
+      try {
+        passwordHash = await hashPassword(password, salt);
+      } catch (e) {
+        console.error("update_user_password_hash_failed", e);
+        return error("password_hash_failed", "خطا در پردازش امن رمز عبور.", 503);
+      }
       await env.DB.prepare(
         "UPDATE users SET username=?, name=?, role=?, active=?, pin_hash=?, pin_salt=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
       ).bind(username, name, role, active, passwordHash, salt, targetId).run();
