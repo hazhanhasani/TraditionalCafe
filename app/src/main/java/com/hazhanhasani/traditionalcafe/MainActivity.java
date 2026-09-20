@@ -447,11 +447,38 @@ public class MainActivity extends Activity {
 
         TextView settings = label("⋮", 30, ink, false);
         settings.setGravity(Gravity.CENTER);
-        settings.setOnClickListener(v -> checkForUpdates(true));
+        settings.setOnClickListener(v -> showAppMenu());
         LinearLayout.LayoutParams settingsLp = new LinearLayout.LayoutParams(dp(40), dp(46));
         row.addView(settings, settingsLp);
 
         return row;
+    }
+
+    private void showAppMenu() {
+        String[] options = new String[]{
+                "بررسی بروزرسانی",
+                "عیب‌یابی کامل /debug",
+                "خروج از حساب"
+        };
+
+        new AlertDialog.Builder(this)
+                .setTitle("تنظیمات")
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        checkForUpdates(true);
+                    } else if (which == 1) {
+                        startActivity(new Intent(this, DebugActivity.class));
+                    } else if (which == 2) {
+                        getSharedPreferences("session", MODE_PRIVATE)
+                                .edit()
+                                .clear()
+                                .apply();
+                        startActivity(new Intent(this, AuthActivity.class));
+                        finish();
+                    }
+                })
+                .setNegativeButton("بستن", null)
+                .show();
     }
 
     private View buildHeroCard() {
