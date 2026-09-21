@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: traditionalcafe-d1-e2e
+  group: traditionalcafe-offline-sync-e2e
   cancel-in-progress: false
 
 jobs:
