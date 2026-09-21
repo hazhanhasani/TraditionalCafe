@@ -1,0 +1,271 @@
+name: Cleanup Production E2E Residue
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/cleanup-production-e2e-residue.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Inspect E2E residue before cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --command "
+          SELECT 'test_users' AS kind, COUNT(*) AS count
+          FROM users
+          WHERE username GLOB 'e2e[0-9]*'
+             OR username GLOB 'menu[0-9]*'
+             OR username GLOB 'offline[0-9]*';
+
+          SELECT 'test_tables' AS kind, COUNT(*) AS count
+          FROM cafe_tables
+          WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%';
+
+          SELECT 'test_customers' AS kind, COUNT(*) AS count
+          FROM customers
+          WHERE name LIKE 'E2E-Customer-%';
+
+          SELECT 'test_expenses' AS kind, COALESCE(SUM(amount),0) AS amount
+          FROM expenses
+          WHERE category='E2E' OR description LIKE 'E2E expense %';
+
+          SELECT 'test_orders' AS kind, COALESCE(SUM(total),0) AS amount
+          FROM orders
+          WHERE opened_by IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          )
+          OR table_id IN (
+            SELECT id FROM cafe_tables
+            WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%'
+          );
+          "
+
+      - name: Remove E2E residue from production D1
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --command "
+          DELETE FROM backup_snapshots
+          WHERE reason LIKE 'e2e_backup_%'
+             OR created_by IN (
+               SELECT id FROM users
+               WHERE username GLOB 'e2e[0-9]*'
+                  OR username GLOB 'menu[0-9]*'
+                  OR username GLOB 'offline[0-9]*'
+             );
+
+          DELETE FROM customer_ledger
+          WHERE customer_id IN (
+            SELECT id FROM customers WHERE name LIKE 'E2E-Customer-%'
+          )
+          OR created_by IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          )
+          OR order_id IN (
+            SELECT id FROM orders
+            WHERE opened_by IN (
+              SELECT id FROM users
+              WHERE username GLOB 'e2e[0-9]*'
+                 OR username GLOB 'menu[0-9]*'
+                 OR username GLOB 'offline[0-9]*'
+            )
+            OR table_id IN (
+              SELECT id FROM cafe_tables
+              WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%'
+            )
+          );
+
+          DELETE FROM payments
+          WHERE created_by IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          )
+          OR order_id IN (
+            SELECT id FROM orders
+            WHERE opened_by IN (
+              SELECT id FROM users
+              WHERE username GLOB 'e2e[0-9]*'
+                 OR username GLOB 'menu[0-9]*'
+                 OR username GLOB 'offline[0-9]*'
+            )
+            OR table_id IN (
+              SELECT id FROM cafe_tables
+              WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%'
+            )
+          );
+
+          DELETE FROM inventory_movements
+          WHERE created_by IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          )
+          OR order_id IN (
+            SELECT id FROM orders
+            WHERE opened_by IN (
+              SELECT id FROM users
+              WHERE username GLOB 'e2e[0-9]*'
+                 OR username GLOB 'menu[0-9]*'
+                 OR username GLOB 'offline[0-9]*'
+            )
+            OR table_id IN (
+              SELECT id FROM cafe_tables
+              WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%'
+            )
+          );
+
+          DELETE FROM order_items
+          WHERE created_by IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          )
+          OR order_id IN (
+            SELECT id FROM orders
+            WHERE opened_by IN (
+              SELECT id FROM users
+              WHERE username GLOB 'e2e[0-9]*'
+                 OR username GLOB 'menu[0-9]*'
+                 OR username GLOB 'offline[0-9]*'
+            )
+            OR table_id IN (
+              SELECT id FROM cafe_tables
+              WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%'
+            )
+          );
+
+          DELETE FROM expenses
+          WHERE category='E2E'
+             OR description LIKE 'E2E expense %'
+             OR created_by IN (
+               SELECT id FROM users
+               WHERE username GLOB 'e2e[0-9]*'
+                  OR username GLOB 'menu[0-9]*'
+                  OR username GLOB 'offline[0-9]*'
+             );
+
+          DELETE FROM audit_logs
+          WHERE user_id IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          );
+
+          DELETE FROM offline_operations
+          WHERE user_id IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          );
+
+          DELETE FROM orders
+          WHERE opened_by IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          )
+          OR table_id IN (
+            SELECT id FROM cafe_tables
+            WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%'
+          );
+
+          DELETE FROM catalog_inventory_links
+          WHERE catalog_type='service'
+            AND catalog_id IN (
+              SELECT id FROM service_catalog
+              WHERE name LIKE 'E2E-%' OR name LIKE 'Offline-Service-%'
+            );
+
+          DELETE FROM service_catalog
+          WHERE name LIKE 'E2E-%' OR name LIKE 'Offline-Service-%';
+
+          DELETE FROM catalog_categories
+          WHERE name LIKE 'E2E-%';
+
+          DELETE FROM customers
+          WHERE name LIKE 'E2E-Customer-%';
+
+          DELETE FROM cafe_tables
+          WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%';
+
+          DELETE FROM cash_shifts
+          WHERE user_id IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          );
+
+          DELETE FROM sessions
+          WHERE user_id IN (
+            SELECT id FROM users
+            WHERE username GLOB 'e2e[0-9]*'
+               OR username GLOB 'menu[0-9]*'
+               OR username GLOB 'offline[0-9]*'
+          );
+
+          DELETE FROM users
+          WHERE username GLOB 'e2e[0-9]*'
+             OR username GLOB 'menu[0-9]*'
+             OR username GLOB 'offline[0-9]*';
+          "
+
+      - name: Verify production is clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULT="$(npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --json --command "
+          SELECT
+            (SELECT COUNT(*) FROM users
+             WHERE username GLOB 'e2e[0-9]*'
+                OR username GLOB 'menu[0-9]*'
+                OR username GLOB 'offline[0-9]*') AS test_users,
+            (SELECT COUNT(*) FROM cafe_tables
+             WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%') AS test_tables,
+            (SELECT COUNT(*) FROM customers
+             WHERE name LIKE 'E2E-Customer-%') AS test_customers,
+            (SELECT COUNT(*) FROM expenses
+             WHERE category='E2E' OR description LIKE 'E2E expense %') AS test_expenses,
+            (SELECT COUNT(*) FROM service_catalog
+             WHERE name LIKE 'E2E-%' OR name LIKE 'Offline-Service-%') AS test_catalog;
+          ")"
+          echo "$RESULT"
+          node -e '
+            const raw = JSON.parse(process.argv[1]);
+            const row = raw[0]?.results?.[0] || {};
+            const bad = Object.entries(row).filter(([,v]) => Number(v) !== 0);
+            if (bad.length) {
+              console.error("E2E residue remains:", bad);
+              process.exit(1);
+            }
+            console.log("Production E2E residue cleanup verified.");
+          ' "$RESULT"
