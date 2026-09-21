@@ -377,7 +377,11 @@ async function backupTableNames(env) {
   ).all();
   return (rows.results || [])
     .map((row) => String(row.name || ""))
-    .filter((name) => validIdentifier(name) && !BACKUP_EXCLUDED_TABLES.has(name));
+    .filter((name) =>
+      validIdentifier(name) &&
+      !name.startsWith("_cf_") &&
+      !BACKUP_EXCLUDED_TABLES.has(name)
+    );
 }
 
 async function flushBackupChunk(env, snapshotId, tableName, chunkIndex, rows) {
@@ -997,30 +1001,57 @@ async function route(request, env) {
       return error("password_hash_failed", "خطا در پردازش امن رمز عبور. دوباره تلاش کنید.", 503);
     }
 
+    let userId;
     try {
       const result = await env.DB.prepare(
         "INSERT INTO users (username,name,role,pin_hash,pin_salt) VALUES (?,?,?,?,?)",
       ).bind(username, name, role, passwordHash, salt).run();
+      userId = Number(result.meta.last_row_id);
+    } catch (e) {
+      const existing = await env.DB.prepare(
+        "SELECT id FROM users WHERE username=? COLLATE NOCASE LIMIT 1"
+      ).bind(username).first();
 
-      const userId = Number(result.meta.last_row_id);
-      const token = randomHex(32);
-      const tokenHash = await sha256Hex(token);
+      if (existing) {
+        return error("user_exists", "این نام کاربری قبلاً ثبت شده است.", 409);
+      }
+
+      console.error("setup_user_insert_failed", e);
+      return error(
+        "setup_user_insert_failed",
+        "ساخت کاربر آزمایشی در پایگاه‌داده انجام نشد. دوباره تلاش کنید.",
+        503
+      );
+    }
+
+    const token = randomHex(32);
+    const tokenHash = await sha256Hex(token);
+
+    try {
       await env.DB.prepare(
         "INSERT INTO sessions (user_id, token_hash, expires_at) VALUES (?, ?, datetime('now','+30 days'))",
       ).bind(userId, tokenHash).run();
-
-      await audit(env, userId, "setup_user", "user", userId, { username, name, role });
-      const permissions = await rolePermissions(env, role);
-      return json({
-        ok: true,
-        token,
-        user: { id: userId, username, name, role },
-        permissions,
-        expires_in_days: 30,
-      }, 201);
     } catch (e) {
-      return error("user_exists", "این نام کاربری قبلاً ثبت شده است.", 409);
+      try {
+        await env.DB.prepare("DELETE FROM users WHERE id=?").bind(userId).run();
+      } catch {}
+      console.error("setup_session_insert_failed", e);
+      return error(
+        "setup_session_insert_failed",
+        "ساخت نشست ورود انجام نشد. دوباره تلاش کنید.",
+        503
+      );
     }
+
+    await audit(env, userId, "setup_user", "user", userId, { username, name, role });
+    const permissions = await rolePermissions(env, role);
+    return json({
+      ok: true,
+      token,
+      user: { id: userId, username, name, role },
+      permissions,
+      expires_in_days: 30,
+    }, 201);
   }
 
   if (path === "/api/auth/login" && method === "POST") {
