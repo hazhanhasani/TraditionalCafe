@@ -198,40 +198,9 @@ public class OrderActivity extends Activity {
         }
 
         if ("open".equals(status)) {
-            LinearLayout menuRow1 = new LinearLayout(this);
-            menuRow1.setOrientation(LinearLayout.HORIZONTAL);
-            menuRow1.setGravity(Gravity.CENTER);
-
-            Button addHookah = smallButton("قلیان +");
-            addHookah.setOnClickListener(v -> showCatalogPicker("hookah"));
-            menuRow1.addView(addHookah, new LinearLayout.LayoutParams(0, dp(50), 1f));
-
-            Button addDrink = smallButton("نوشیدنی +");
-            addDrink.setOnClickListener(v -> showCatalogPicker("drink"));
-            LinearLayout.LayoutParams drinkLp = new LinearLayout.LayoutParams(0, dp(50), 1f);
-            drinkLp.setMarginStart(dp(8));
-            menuRow1.addView(addDrink, drinkLp);
-            content.addView(menuRow1);
-
-            LinearLayout menuRow2 = new LinearLayout(this);
-            menuRow2.setOrientation(LinearLayout.HORIZONTAL);
-            menuRow2.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams menuRow2Lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            );
-            menuRow2Lp.topMargin = dp(8);
-            menuRow2.setLayoutParams(menuRow2Lp);
-
-            Button addFood = smallButton("خوراکی +");
-            addFood.setOnClickListener(v -> showCatalogPicker("food"));
-            menuRow2.addView(addFood, new LinearLayout.LayoutParams(0, dp(50), 1f));
-
-            Button addService = smallButton("خدمت +");
-            addService.setOnClickListener(v -> showCatalogPicker("service"));
-            LinearLayout.LayoutParams serviceLp = new LinearLayout.LayoutParams(0, dp(50), 1f);
-            serviceLp.setMarginStart(dp(8));
-            menuRow2.addView(addService, serviceLp);
-            content.addView(menuRow2);
+            Button addItem = primaryButton("افزودن به سفارش");
+            addItem.setOnClickListener(v -> showAddItemMenu());
+            content.addView(addItem);
         }
 
         if ("open".equals(status)) {
@@ -245,9 +214,11 @@ public class OrderActivity extends Activity {
                 settle.setOnClickListener(v -> prepareSettlement());
                 content.addView(settle);
 
-                Button manage = secondaryButton("مدیریت سفارش");
-                manage.setOnClickListener(v -> showOrderManagement());
-                content.addView(manage);
+                if (isPrivileged()) {
+                    Button manage = secondaryButton("گزینه‌های بیشتر سفارش");
+                    manage.setOnClickListener(v -> showOrderManagement());
+                    content.addView(manage);
+                }
             }
         } else if ("settled".equals(status)) {
             Button receipt = primaryButton("مشاهده رسید");
@@ -628,6 +599,30 @@ public class OrderActivity extends Activity {
                     }).start();
                 })
                 .setNegativeButton("انصراف", null)
+                .show();
+    }
+
+    private void showAddItemMenu() {
+        String[] options = new String[]{
+                "قلیان",
+                "نوشیدنی",
+                "خوراکی",
+                "خدمات"
+        };
+
+        new AlertDialog.Builder(this)
+                .setTitle("چه چیزی اضافه شود؟")
+                .setItems(options, (dialog, which) -> {
+                    String type = which == 0
+                            ? "hookah"
+                            : which == 1
+                            ? "drink"
+                            : which == 2
+                            ? "food"
+                            : "service";
+                    showCatalogPicker(type);
+                })
+                .setNegativeButton("لغو", null)
                 .show();
     }
 
