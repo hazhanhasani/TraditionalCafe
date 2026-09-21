@@ -186,9 +186,30 @@ jobs:
             phone: "09120000000",
             notes: "E2E credit customer",
             credit_limit: 30000,
-            due_days: 1
+            due_days: 1,
+            opening_debt: 4000,
+            opening_debt_age_days: 40,
+            opening_debt_note: "بدهی قبلی دفتر قدیمی E2E"
           }, token);
           assert(Number(customer.id) > 0, "customer creation failed");
+          assert(customer.balance === 4000, "opening debt response mismatch");
+
+          const ledgerAfterCreate = await request(
+            "/api/customers/" + customer.id + "/ledger?full=1",
+            "GET",
+            null,
+            token
+          );
+          assert(ledgerAfterCreate.customer.balance === 4000, "opening debt balance mismatch");
+          assert(ledgerAfterCreate.customer.overdue_amount === 4000, "opening debt overdue mismatch");
+          assert(
+            (ledgerAfterCreate.entries || []).some(x =>
+              x.entry_type === "adjustment" &&
+              x.amount === 4000 &&
+              String(x.note || "").includes("بدهی قبلی")
+            ),
+            "opening debt ledger entry missing"
+          );
 
           const creditOrder = await request("/api/tables/" + a.id + "/open", "POST", {}, token);
           await request("/api/orders/" + creditOrder.order_id + "/items", "POST", {
@@ -207,8 +228,8 @@ jobs:
             null,
             token
           );
-          assert(ledgerAfterCredit.customer.balance === 20000, "credit balance mismatch");
-          assert(ledgerAfterCredit.customer.remaining_credit === 10000, "remaining credit mismatch");
+          assert(ledgerAfterCredit.customer.balance === 24000, "credit balance mismatch");
+          assert(ledgerAfterCredit.customer.remaining_credit === 6000, "remaining credit mismatch");
           assert((ledgerAfterCredit.entries || []).some(x => x.entry_type === "debt" && x.due_at), "credit due date missing");
 
           await request("/api/customers/" + customer.id + "/payment", "POST", {
@@ -223,7 +244,7 @@ jobs:
             null,
             token
           );
-          assert(ledgerAfterPayment.customer.balance === 15000, "partial payment balance mismatch");
+          assert(ledgerAfterPayment.customer.balance === 19000, "partial payment balance mismatch");
 
           await request("/api/customers/" + customer.id + "/adjustment", "POST", {
             direction: "debt",
@@ -243,8 +264,8 @@ jobs:
             null,
             token
           );
-          assert(ledgerAfterAdjustment.customer.balance === 16000, "adjustment balance mismatch");
-          assert(ledgerAfterAdjustment.statement.transaction_count >= 4, "statement summary missing");
+          assert(ledgerAfterAdjustment.customer.balance === 20000, "adjustment balance mismatch");
+          assert(ledgerAfterAdjustment.statement.transaction_count >= 5, "statement summary missing");
           assert(
             (ledgerAfterAdjustment.entries || []).some(x =>
               x.entry_type === "adjustment" && x.running_balance !== null
