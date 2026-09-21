@@ -403,24 +403,16 @@ public class MainActivity extends Activity {
         content.addView(buildHeroCard());
 
         content.addView(sectionHeader(
-                isStaff() ? "فروش و نسیه امروز من" : "نمای کلی امروز",
-                "لحظه‌ای"
-        ));
-        content.addView(buildMetrics());
-
-        content.addView(sectionHeader(
-                "دسترسی سریع",
-                isStaff() ? "ابزارهای فروش من" : "همه ابزارها"
+                "کارهای اصلی",
+                "ساده و سریع"
         ));
         content.addView(buildQuickActions());
 
-        content.addView(sectionHeader("وضعیت میزها", "مدیریت میزها"));
+        content.addView(sectionHeader(
+                "میزها",
+                "برای فروش روی میز بزن"
+        ));
         content.addView(buildTablesCard());
-
-        if (!isStaff()) {
-            content.addView(sectionHeader("فعالیت اخیر", "مشاهده همه"));
-            content.addView(buildEmptyActivity());
-        }
 
         shell.addView(buildBottomNav());
         return shell;
@@ -487,29 +479,25 @@ public class MainActivity extends Activity {
     }
 
     private void showAppMenu() {
-        String role = getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff");
-        final boolean admin = "admin".equals(role);
-
-        String[] options = admin
-                ? new String[]{"بررسی بروزرسانی", "تنظیمات رسید", "پشتیبان و بازیابی", "عیب‌یابی کامل /debug", "خروج از حساب"}
-                : new String[]{"بررسی بروزرسانی", "خروج از حساب"};
+        String[] options = new String[]{
+                "بیشتر",
+                "بررسی بروزرسانی",
+                "خروج از حساب"
+        };
 
         new AlertDialog.Builder(this)
-                .setTitle("تنظیمات")
+                .setTitle("منو")
                 .setItems(options, (dialog, which) -> {
                     if (which == 0) {
+                        startActivity(new Intent(this, MoreToolsActivity.class));
+                    } else if (which == 1) {
                         checkForUpdates(true);
-                    } else if (admin && which == 1) {
-                        startActivity(new Intent(this, ReceiptSettingsActivity.class));
-                    } else if (admin && which == 2) {
-                        startActivity(new Intent(this, BackupRecoveryActivity.class));
-                    } else if (admin && which == 3) {
-                        startActivity(new Intent(this, DebugActivity.class));
                     } else {
                         getSharedPreferences("session", MODE_PRIVATE)
                                 .edit()
                                 .clear()
                                 .apply();
+                        PermissionStore.clear(this);
                         startActivity(new Intent(this, AuthActivity.class));
                         finish();
                     }
@@ -663,62 +651,71 @@ public class MainActivity extends Activity {
     }
 
     private View buildQuickActions() {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
         grid.setAlignmentMode(GridLayout.ALIGN_MARGINS);
 
-        grid.addView(actionTile("میزها", "سفارش و وضعیت میز", R.drawable.ic_table, turquoise, softTeal));
-        grid.addView(actionTile("ثبت قلیان", "ثبت سریع فروش خودم", R.drawable.ic_hookah, brown, softGold));
-        grid.addView(actionTile("حساب دفتری", "نسیه و پرداخت مشتری", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
-
-        boolean allShifts = PermissionStore.has(this, "view_all_shifts");
         grid.addView(actionTile(
-                allShifts ? "شیفت و صندوق" : "شیفت من",
-                allShifts ? "صندوق، کسری/اضافه و شیفت کاربران" : "شروع، پایان و جمع فروش خودم",
+                "فروش جدید",
+                "انتخاب میز و ثبت سفارش",
+                R.drawable.ic_table,
+                turquoise,
+                softTeal
+        ));
+
+        grid.addView(actionTile(
+                "تسویه",
+                "دریافت وجه سفارش",
                 R.drawable.ic_wallet,
                 Color.rgb(44, 117, 78),
                 Color.rgb(232, 243, 235)
         ));
 
-        if (isStaff()) {
-            grid.addView(actionTile("فروش‌های امروز من", "فقط فروش‌های ثبت‌شده توسط من", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
-            grid.addView(actionTile("تسویه", "تسویه سفارش‌های خودم", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
-        } else {
-            if (PermissionStore.has(this, "view_all_orders")) {
-                grid.addView(actionTile("مدیریت سفارش‌ها", "ویرایش، انتقال، لغو و اصلاح تسویه", R.drawable.ic_table, brown, softGold));
-            }
-            if (PermissionStore.has(this, "manage_catalog")) {
-                grid.addView(actionTile("مدیریت منو", "قلیان، نوشیدنی، خوراکی، خدمات و دسته‌بندی", R.drawable.ic_hookah, turquoise, softTeal));
-            }
-            if (PermissionStore.has(this, "manage_expenses")) {
-                grid.addView(actionTile("ثبت هزینه", "خرید و هزینه‌های روز", R.drawable.ic_expense, Color.rgb(177, 84, 68), Color.rgb(250, 235, 232)));
-            }
-            if (PermissionStore.has(this, "manage_inventory")) {
-                grid.addView(actionTile("انبار و موجودی", "خرید، موجودی، کمبود و اتصال به فروش", R.drawable.ic_expense, Color.rgb(14, 117, 120), softTeal));
-            }
-            grid.addView(actionTile("تسویه", "نقد، کارت و ترکیبی", R.drawable.ic_wallet, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
-            if (PermissionStore.has(this, "view_reports")) {
-                grid.addView(actionTile("گزارش‌ها", "سود و زیان و عملکرد", R.drawable.ic_chart, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
-            }
-            if (PermissionStore.has(this, "view_audit_log")) {
-                grid.addView(actionTile("مرکز فعالیت‌ها", "تغییرات، عملیات حساس و فعالیت کاربران", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
-            }
-            if (isAdmin()) {
-                grid.addView(actionTile("تنظیمات رسید", "نام مجموعه، تماس، آدرس و متن انتهای رسید", R.drawable.ic_book, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
-                grid.addView(actionTile("پشتیبان و بازیابی", "بکاپ روزانه، خروجی فایل و بازیابی امن", R.drawable.ic_book, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
-                grid.addView(actionTile("کاربران و دسترسی‌ها", "ساخت حساب، نقش، رمز و فعالیت", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
-            }
-        }
-
         grid.addView(actionTile(
-                "حالت آفلاین",
-                "Cache، سفارش‌های ذخیره‌شده و صف همگام‌سازی",
+                "بدهی مشتریان",
+                "ثبت بدهی و دریافت پرداخت",
                 R.drawable.ic_book,
-                Color.rgb(14, 117, 120),
-                softTeal
+                Color.rgb(92, 78, 148),
+                Color.rgb(239, 236, 249)
         ));
 
-        return grid;
+        boolean allShifts = PermissionStore.has(this, "view_all_shifts");
+        grid.addView(actionTile(
+                allShifts ? "شیفت و صندوق" : "شیفت من",
+                "شروع و پایان شیفت",
+                R.drawable.ic_wallet,
+                brown,
+                softGold
+        ));
+
+        wrap.addView(grid);
+
+        TextView more = label(
+                "بیشتر؛ گزارش، منو، انبار و تنظیمات",
+                13,
+                turquoise,
+                true
+        );
+        more.setGravity(Gravity.CENTER);
+        more.setPadding(dp(14), dp(13), dp(14), dp(13));
+        GradientDrawable moreBg = rounded(surface, 18);
+        moreBg.setStroke(dp(1), divider);
+        more.setBackground(moreBg);
+        more.setOnClickListener(v ->
+                startActivity(new Intent(this, MoreToolsActivity.class))
+        );
+
+        LinearLayout.LayoutParams moreLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        moreLp.setMargins(dp(5), dp(7), dp(5), 0);
+        wrap.addView(more, moreLp);
+
+        return wrap;
     }
 
     private View actionTile(String titleText, String subtitleText, int iconRes, int iconTint, int iconBg) {
@@ -798,7 +795,7 @@ public class MainActivity extends Activity {
         chips.setPadding(0, dp(16), 0, 0);
         card.addView(chips);
 
-        TextView open = label("+ باز کردن میز جدید", 13, turquoise, true);
+        TextView open = label("+ فروش جدید", 13, turquoise, true);
         open.setGravity(Gravity.CENTER);
         open.setPadding(dp(12), dp(12), dp(12), dp(12));
         GradientDrawable openBg = rounded(softTeal, 16);
@@ -843,28 +840,30 @@ public class MainActivity extends Activity {
     }
 
     private void openModuleForTitle(String title) {
-        if ("میزها".equals(title)) {
+        if ("فروش جدید".equals(title) || "میزها".equals(title)) {
             openModule("tables");
-        } else if ("ثبت قلیان".equals(title)) {
-            openModule("hookah");
-        } else if ("شیفت من".equals(title) || "شیفت و صندوق".equals(title)) {
+        } else if ("تسویه".equals(title)) {
+            openModule("settlement");
+        } else if (
+                "بدهی مشتریان".equals(title) ||
+                "حساب دفتری".equals(title)
+        ) {
+            openModule("customers");
+        } else if (
+                "شیفت من".equals(title) ||
+                "شیفت و صندوق".equals(title)
+        ) {
             startActivity(new Intent(this, ShiftActivity.class));
-        } else if ("کاربران و دسترسی‌ها".equals(title)) {
-            startActivity(new Intent(this, UserManagementActivity.class));
         } else if ("فروش‌های امروز من".equals(title)) {
             openModule("my_sales");
         } else if ("مدیریت سفارش‌ها".equals(title)) {
             openModule("orders");
         } else if ("مدیریت منو".equals(title)) {
             startActivity(new Intent(this, CatalogActivity.class));
-        } else if ("حساب دفتری".equals(title)) {
-            openModule("customers");
         } else if ("ثبت هزینه".equals(title)) {
             openModule("expenses");
         } else if ("انبار و موجودی".equals(title)) {
             startActivity(new Intent(this, InventoryActivity.class));
-        } else if ("تسویه".equals(title)) {
-            openModule("settlement");
         } else if ("گزارش‌ها".equals(title)) {
             startActivity(new Intent(this, DailyReportActivity.class));
         } else if ("مرکز فعالیت‌ها".equals(title)) {
@@ -1074,15 +1073,22 @@ public class MainActivity extends Activity {
         nav.setBackgroundColor(surface);
         nav.setElevation(dp(12));
 
-        nav.addView(navItem("خانه", R.drawable.ic_home, true), new LinearLayout.LayoutParams(0, dp(58), 1f));
-        nav.addView(navItem("میزها", R.drawable.ic_table, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
-        nav.addView(navItem("دفتر", R.drawable.ic_book, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
-
-        if (isStaff()) {
-            nav.addView(navItem("فروش من", R.drawable.ic_wallet, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
-        } else {
-            nav.addView(navItem("گزارش", R.drawable.ic_chart, false), new LinearLayout.LayoutParams(0, dp(58), 1f));
-        }
+        nav.addView(
+                navItem("خانه", R.drawable.ic_home, true),
+                new LinearLayout.LayoutParams(0, dp(58), 1f)
+        );
+        nav.addView(
+                navItem("فروش", R.drawable.ic_table, false),
+                new LinearLayout.LayoutParams(0, dp(58), 1f)
+        );
+        nav.addView(
+                navItem("مشتری", R.drawable.ic_book, false),
+                new LinearLayout.LayoutParams(0, dp(58), 1f)
+        );
+        nav.addView(
+                navItem("بیشتر", R.drawable.ic_wallet, false),
+                new LinearLayout.LayoutParams(0, dp(58), 1f)
+        );
 
         return nav;
     }
@@ -1105,10 +1111,13 @@ public class MainActivity extends Activity {
 
         item.setOnClickListener(v -> {
             if ("خانه".equals(title)) return;
-            if ("میزها".equals(title)) openModule("tables");
-            else if ("دفتر".equals(title)) openModule("customers");
-            else if ("فروش من".equals(title)) openModule("my_sales");
-            else if ("گزارش".equals(title)) openModule("reports");
+            if ("فروش".equals(title)) {
+                openModule("tables");
+            } else if ("مشتری".equals(title)) {
+                openModule("customers");
+            } else if ("بیشتر".equals(title)) {
+                startActivity(new Intent(this, MoreToolsActivity.class));
+            }
         });
         return item;
     }
