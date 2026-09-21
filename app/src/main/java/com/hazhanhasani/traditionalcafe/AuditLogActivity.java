@@ -1185,8 +1185,8 @@ public class AuditLogActivity extends Activity {
     }
 
     private EditText field(String hint) {
-        EditText e = new EditText(this);
-        e.setHint(hint);
+        LabeledEditText e = new LabeledEditText(this);
+        e.setFieldLabel(hint);
         e.setTextSize(14);
         e.setTextColor(ink);
         e.setHintTextColor(muted);
