@@ -593,8 +593,8 @@ public class CustomerLedgerActivity extends Activity {
     }
 
     private EditText field(String hint, boolean number) {
-        EditText input = new LabeledEditText(this);
-        input.setHint(hint);
+        LabeledEditText input = new LabeledEditText(this);
+        input.setFieldLabel(hint);
         input.setTextSize(14);
         input.setTextColor(ink);
         input.setHintTextColor(muted);
