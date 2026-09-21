@@ -526,7 +526,7 @@ public class RecipeActivity extends Activity {
     }
 
     private EditText numberField(String hint, String value) {
-        EditText input = new EditText(this);
+        EditText input = new LabeledEditText(this);
         input.setHint(hint);
         input.setText(value);
         input.setSelectAllOnFocus(true);
