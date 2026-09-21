@@ -18,6 +18,8 @@ import android.widget.TextView;
  */
 public class LabeledEditText extends EditText {
 
+    public static final String FORM_STANDARD = "persistent-labels-v1";
+
     private CharSequence fieldLabel = "";
     private TextView labelView;
     private boolean labelAttached;
