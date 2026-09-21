@@ -211,8 +211,12 @@ public class OrderActivity extends Activity {
             Button manage = secondaryButton("مدیریت سفارش");
             manage.setOnClickListener(v -> showOrderManagement());
             content.addView(manage);
-        } else if ("settled".equals(status) && isPrivileged()) {
-            if (PermissionStore.has(this, "reverse_settlement")) {
+        } else if ("settled".equals(status)) {
+            Button receipt = primaryButton("مشاهده رسید");
+            receipt.setOnClickListener(v -> openReceipt());
+            content.addView(receipt);
+
+            if (isPrivileged() && PermissionStore.has(this, "reverse_settlement")) {
                 Button reverse = secondaryButton("برگرداندن تسویه اشتباه");
                 reverse.setOnClickListener(v -> showReverseSettlementDialog());
                 content.addView(reverse);
@@ -946,7 +950,7 @@ public class OrderActivity extends Activity {
                             ApiClient.post(this, "/api/orders/" + orderId + "/settle", body);
                             runOnUiThread(() -> {
                                 Toast.makeText(this, "سفارش تسویه شد.", Toast.LENGTH_LONG).show();
-                                finish();
+                                openReceipt();
                             });
                         } catch (Exception e) {
                             runOnUiThread(() -> showError(e.getMessage()));
@@ -955,6 +959,12 @@ public class OrderActivity extends Activity {
                 })
                 .setNegativeButton("لغو", null)
                 .show();
+    }
+
+    private void openReceipt() {
+        Intent intent = new Intent(this, ReceiptActivity.class);
+        intent.putExtra("order_id", orderId);
+        startActivity(intent);
     }
 
     private JSONObject payment(String method, long amount, Long customerId) throws Exception {
