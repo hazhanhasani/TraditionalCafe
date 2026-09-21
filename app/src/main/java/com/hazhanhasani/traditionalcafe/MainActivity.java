@@ -77,6 +77,7 @@ public class MainActivity extends Activity {
     private TextView tablesSummaryTitleView;
     private TextView tablesSummarySubtitleView;
     private TextView tablesSummaryStatusView;
+    private TextView offlineStatusView;
     private LinearLayout dashboardTableChips;
 
     private final Runnable clockRunnable = new Runnable() {
@@ -85,6 +86,7 @@ public class MainActivity extends Activity {
             if (jalaliClockView != null) {
                 jalaliClockView.setText(JalaliDateTime.nowFull());
             }
+            refreshOfflineStatus();
             updateHandler.postDelayed(this, 60000L);
         }
     };
@@ -130,7 +132,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        refreshOfflineStatus();
         refreshDashboard();
+        OfflineSyncManager.syncAsync(this);
     }
 
     private void startPeriodicUpdateChecks() {
@@ -465,6 +469,14 @@ public class MainActivity extends Activity {
         jalaliClockView.setPadding(0, dp(5), 0, 0);
         titles.addView(jalaliClockView);
 
+        offlineStatusView = label("در حال بررسی اتصال…", 10, muted, true);
+        offlineStatusView.setGravity(Gravity.RIGHT);
+        offlineStatusView.setPadding(0, dp(5), 0, 0);
+        offlineStatusView.setOnClickListener(v ->
+                startActivity(new Intent(this, OfflineCenterActivity.class))
+        );
+        titles.addView(offlineStatusView);
+
         TextView settings = label("⋮", 30, ink, false);
         settings.setGravity(Gravity.CENTER);
         settings.setOnClickListener(v -> showAppMenu());
@@ -698,6 +710,14 @@ public class MainActivity extends Activity {
             }
         }
 
+        grid.addView(actionTile(
+                "حالت آفلاین",
+                "Cache، سفارش‌های ذخیره‌شده و صف همگام‌سازی",
+                R.drawable.ic_book,
+                Color.rgb(14, 117, 120),
+                softTeal
+        ));
+
         return grid;
     }
 
@@ -853,6 +873,8 @@ public class MainActivity extends Activity {
             startActivity(new Intent(this, BackupRecoveryActivity.class));
         } else if ("تنظیمات رسید".equals(title)) {
             startActivity(new Intent(this, ReceiptSettingsActivity.class));
+        } else if ("حالت آفلاین".equals(title)) {
+            startActivity(new Intent(this, OfflineCenterActivity.class));
         }
     }
 
@@ -864,6 +886,40 @@ public class MainActivity extends Activity {
         Intent intent = new Intent(this, OperationsActivity.class);
         intent.putExtra("module", module);
         startActivity(intent);
+    }
+
+    private void refreshOfflineStatus() {
+        if (offlineStatusView == null) return;
+
+        boolean online = OfflineSyncManager.isOnline(this);
+        boolean syncing = OfflineSyncManager.isSyncing();
+        int pending = OfflineStore.pendingCount(this) + OfflineStore.pendingDraftCount(this);
+        int failed = OfflineStore.failedCount(this);
+
+        String value;
+        int color;
+
+        if (syncing) {
+            value = "در حال همگام‌سازی";
+            color = turquoise;
+        } else if (!online) {
+            value = pending > 0
+                    ? "آفلاین • " + JalaliDateTime.fa(String.valueOf(pending)) + " مورد ذخیره‌شده"
+                    : "آفلاین • نمایش آخرین داده ذخیره‌شده";
+            color = Color.rgb(177, 84, 68);
+        } else if (failed > 0) {
+            value = "آنلاین • " + JalaliDateTime.fa(String.valueOf(failed)) + " مورد نیازمند بررسی";
+            color = Color.rgb(177, 84, 68);
+        } else if (pending > 0) {
+            value = "آنلاین • " + JalaliDateTime.fa(String.valueOf(pending)) + " مورد در صف";
+            color = brown;
+        } else {
+            value = "آنلاین • همگام";
+            color = green;
+        }
+
+        offlineStatusView.setText(value);
+        offlineStatusView.setTextColor(color);
     }
 
     private void refreshDashboard() {
@@ -883,6 +939,10 @@ public class MainActivity extends Activity {
                 JalaliDateTime.syncServerUtc(timeData.optString("utc", ""));
                 JSONObject data = ApiClient.get(this, "/api/dashboard");
                 JSONObject tablesData = ApiClient.get(this, "/api/tables");
+                try {
+                    ApiClient.get(this, "/api/shifts/current");
+                } catch (Exception ignored) {
+                }
 
                 long sales = data.optLong("sales_today", 0L);
                 long hookahs = data.optLong("hookahs_today", 0L);
@@ -924,6 +984,7 @@ public class MainActivity extends Activity {
                     if (cardTodayView != null) cardTodayView.setText(formatCompactMoney(finalCard));
                     if (creditTodayView != null) creditTodayView.setText(formatCompactMoney(finalCredit));
                     renderDashboardTables(tables);
+                    refreshOfflineStatus();
                 });
             } catch (Exception ignored) {
             }
