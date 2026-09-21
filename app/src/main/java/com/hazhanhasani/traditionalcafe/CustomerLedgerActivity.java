@@ -13,7 +13,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -226,42 +225,14 @@ public class CustomerLedgerActivity extends Activity {
         card.addView(balanceView);
 
         String phone = customer.optString("phone", "");
-        if (!phone.isEmpty()) addLine(card, "شماره تماس", phone, ink);
-
-        long limit = customer.optLong("credit_limit", 0L);
-        addLine(
-                card,
-                "سقف اعتبار",
-                limit > 0 ? money(limit) : "بدون سقف مشخص",
-                limit > 0 && balance >= limit ? red : muted
-        );
-
-        if (limit > 0) {
-            addLine(card, "اعتبار آزاد", money(customer.optLong("remaining_credit", 0L)), turquoise);
-        }
-
-        int dueDays = customer.optInt("due_days", 0);
-        addLine(
-                card,
-                "مهلت پرداخت",
-                dueDays > 0 ? number(dueDays) + " روز" : "بدون سررسید",
-                muted
-        );
-
-        long overdue = customer.optLong("overdue_amount", 0L);
-        if (overdue > 0) {
-            addLine(
-                    card,
-                    "بدهی معوق",
-                    money(overdue) + " • " + number(customer.optLong("days_overdue", 0L)) + " روز",
-                    red
-            );
+        if (!phone.isEmpty()) {
+            addLine(card, "شماره تماس", phone, ink);
         }
 
         if (statement != null && statement.optLong("transaction_count", 0L) > 0) {
             addLine(
                     card,
-                    "جمع نسیه‌ها",
+                    "جمع بدهی‌ها",
                     money(statement.optLong("debt_entries_total", 0L)),
                     muted
             );
@@ -271,14 +242,6 @@ public class CustomerLedgerActivity extends Activity {
                     money(statement.optLong("payments_total", 0L)),
                     green
             );
-        }
-
-        String notes = customer.optString("notes", "");
-        if (!notes.isEmpty()) {
-            TextView note = text("یادداشت: " + notes, 11, muted, false);
-            note.setGravity(Gravity.RIGHT);
-            note.setPadding(0, dp(8), 0, 0);
-            card.addView(note);
         }
 
         content.addView(card);
@@ -337,11 +300,6 @@ public class CustomerLedgerActivity extends Activity {
         }
 
         if (!note.isEmpty()) addLine(card, "توضیح", note, ink);
-
-        String dueAt = entry.optString("due_at", "");
-        if (amount > 0 && !dueAt.isEmpty()) {
-            addLine(card, "سررسید", JalaliDateTime.formatUtcCompact(dueAt), brown);
-        }
 
         if (!entry.isNull("running_balance")) {
             addLine(
@@ -559,40 +517,8 @@ public class CustomerLedgerActivity extends Activity {
         phone.setInputType(InputType.TYPE_CLASS_PHONE);
         phone.setText(customer.optString("phone", ""));
 
-        EditText notes = field("یادداشت", false);
-        notes.setText(customer.optString("notes", ""));
-
         box.addView(name);
         box.addView(phone);
-        box.addView(notes);
-
-        boolean canManage = PermissionStore.has(this, "manage_customer_limits");
-        EditText limit = null;
-        EditText due = null;
-        CheckBox active = null;
-
-        if (canManage) {
-            limit = numberField(
-                    "سقف اعتبار • صفر = بدون سقف",
-                    String.valueOf(customer.optLong("credit_limit", 0L))
-            );
-            due = numberField(
-                    "مهلت پرداخت (روز) • صفر = بدون سررسید",
-                    String.valueOf(customer.optInt("due_days", 0))
-            );
-            active = new CheckBox(this);
-            active.setText("مشتری فعال باشد");
-            active.setTextColor(ink);
-            active.setChecked(customer.optInt("active", 1) == 1);
-
-            box.addView(limit);
-            box.addView(due);
-            box.addView(active);
-        }
-
-        final EditText finalLimit = limit;
-        final EditText finalDue = due;
-        final CheckBox finalActive = active;
 
         new AlertDialog.Builder(this)
                 .setTitle("ویرایش مشتری")
@@ -600,19 +526,27 @@ public class CustomerLedgerActivity extends Activity {
                 .setPositiveButton("ذخیره", (d,w) -> new Thread(() -> {
                     try {
                         JSONObject body = new JSONObject();
-                        body.put("name", name.getText().toString().trim());
-                        body.put("phone", phone.getText().toString().trim());
-                        body.put("notes", notes.getText().toString().trim());
+                        body.put(
+                                "name",
+                                name.getText().toString().trim()
+                        );
+                        body.put(
+                                "phone",
+                                phone.getText().toString().trim()
+                        );
 
-                        if (canManage) {
-                            body.put("credit_limit", parseLong(finalLimit.getText().toString()));
-                            body.put("due_days", parseLong(finalDue.getText().toString()));
-                            body.put("active", finalActive.isChecked());
-                        }
+                        ApiClient.patch(
+                                this,
+                                "/api/customers/" + customerId,
+                                body
+                        );
 
-                        ApiClient.patch(this, "/api/customers/" + customerId, body);
                         runOnUiThread(() -> {
-                            Toast.makeText(this, "اطلاعات مشتری ذخیره شد.", Toast.LENGTH_SHORT).show();
+                            Toast.makeText(
+                                    this,
+                                    "اطلاعات مشتری ذخیره شد.",
+                                    Toast.LENGTH_SHORT
+                            ).show();
                             reload();
                         });
                     } catch (Exception e) {
