@@ -1,0 +1,30 @@
+name: D1 Failure Diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/d1-failure-diagnostics.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect backup failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== BACKUP SNAPSHOTS ==="
+          npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --json --command "SELECT id,kind,reason,status,created_by,created_at,completed_at,table_count,row_count,size_bytes,metadata FROM backup_snapshots ORDER BY created_at DESC LIMIT 30;"
+          echo "=== E2E USERS ==="
+          npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --json --command "SELECT id,username,name,role,active,created_at FROM users WHERE username LIKE 'e2e%' OR username LIKE 'menu%' ORDER BY id DESC LIMIT 40;"
+          echo "=== TABLES ==="
+          npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --json --command "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
