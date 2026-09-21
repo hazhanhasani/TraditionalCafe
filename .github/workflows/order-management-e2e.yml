@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: traditionalcafe-d1-e2e
+  cancel-in-progress: false
+
 jobs:
   e2e:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
@@ -425,6 +429,7 @@ jobs:
           DELETE FROM expenses WHERE description='$EXPENSE_DESC';
           DELETE FROM service_catalog WHERE name='$SERVICE';
           DELETE FROM customers WHERE name='$CUSTOMER';
+          DELETE FROM backup_snapshots WHERE created_by IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM cash_shifts WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM audit_logs WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
