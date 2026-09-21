@@ -13,7 +13,7 @@ const JSON_HEADERS = {
 const encoder = new TextEncoder();
 const PASSWORD_KDF_ITERATIONS = 5000;
 const IRAN_TIME_ZONE = "Asia/Tehran";
-const API_VERSION = "1.4.1";
+const API_VERSION = "1.4.2";
 const ROLE_PERMISSION_KEYS = [
   "view_all_orders",
   "manage_catalog",
