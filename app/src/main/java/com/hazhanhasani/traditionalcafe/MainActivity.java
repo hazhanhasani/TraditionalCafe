@@ -479,7 +479,7 @@ public class MainActivity extends Activity {
         final boolean admin = "admin".equals(role);
 
         String[] options = admin
-                ? new String[]{"بررسی بروزرسانی", "پشتیبان و بازیابی", "عیب‌یابی کامل /debug", "خروج از حساب"}
+                ? new String[]{"بررسی بروزرسانی", "تنظیمات رسید", "پشتیبان و بازیابی", "عیب‌یابی کامل /debug", "خروج از حساب"}
                 : new String[]{"بررسی بروزرسانی", "خروج از حساب"};
 
         new AlertDialog.Builder(this)
@@ -488,8 +488,10 @@ public class MainActivity extends Activity {
                     if (which == 0) {
                         checkForUpdates(true);
                     } else if (admin && which == 1) {
-                        startActivity(new Intent(this, BackupRecoveryActivity.class));
+                        startActivity(new Intent(this, ReceiptSettingsActivity.class));
                     } else if (admin && which == 2) {
+                        startActivity(new Intent(this, BackupRecoveryActivity.class));
+                    } else if (admin && which == 3) {
                         startActivity(new Intent(this, DebugActivity.class));
                     } else {
                         getSharedPreferences("session", MODE_PRIVATE)
@@ -690,6 +692,7 @@ public class MainActivity extends Activity {
                 grid.addView(actionTile("مرکز فعالیت‌ها", "تغییرات، عملیات حساس و فعالیت کاربران", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
             }
             if (isAdmin()) {
+                grid.addView(actionTile("تنظیمات رسید", "نام مجموعه، تماس، آدرس و متن انتهای رسید", R.drawable.ic_book, Color.rgb(174, 124, 45), Color.rgb(251, 241, 220)));
                 grid.addView(actionTile("پشتیبان و بازیابی", "بکاپ روزانه، خروجی فایل و بازیابی امن", R.drawable.ic_book, Color.rgb(44, 117, 78), Color.rgb(232, 243, 235)));
                 grid.addView(actionTile("کاربران و دسترسی‌ها", "ساخت حساب، نقش، رمز و فعالیت", R.drawable.ic_book, Color.rgb(92, 78, 148), Color.rgb(239, 236, 249)));
             }
@@ -848,6 +851,8 @@ public class MainActivity extends Activity {
             startActivity(new Intent(this, AuditLogActivity.class));
         } else if ("پشتیبان و بازیابی".equals(title)) {
             startActivity(new Intent(this, BackupRecoveryActivity.class));
+        } else if ("تنظیمات رسید".equals(title)) {
+            startActivity(new Intent(this, ReceiptSettingsActivity.class));
         }
     }
 
