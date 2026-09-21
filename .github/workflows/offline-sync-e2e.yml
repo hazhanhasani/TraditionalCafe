@@ -1,0 +1,260 @@
+name: Offline Sync E2E
+
+on:
+  workflow_run:
+    workflows:
+      - "Deploy Cloudflare Worker"
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: traditionalcafe-d1-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_BASE: https://traditionalcafe.hazhanhasani4268-0f9.workers.dev
+      CAFE_SETUP_KEY: ${{ secrets.CAFE_SETUP_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test offline sync and idempotency
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const base = process.env.API_BASE;
+          const setupKey = process.env.CAFE_SETUP_KEY;
+          const suffix = process.env.GITHUB_RUN_ID + process.env.GITHUB_RUN_ATTEMPT;
+          const username = "offline" + suffix;
+          const password = "OfflineE2E-" + suffix + "!";
+          const displayName = "Offline E2E " + suffix;
+          const tableName = "OFFLINE-" + suffix;
+          const serviceName = "Offline-Service-" + suffix;
+          const operationId = "draft-" + suffix + "-primary";
+
+          function assert(condition, message) {
+            if (!condition) throw new Error("ASSERT: " + message);
+          }
+
+          async function call(path, method="GET", body=null, token=null, extraHeaders={}) {
+            const headers = {
+              accept: "application/json",
+              "content-type": "application/json",
+              ...extraHeaders
+            };
+            if (token) headers.authorization = "Bearer " + token;
+
+            const response = await fetch(base + path, {
+              method,
+              headers,
+              body: body === null ? undefined : JSON.stringify(body)
+            });
+
+            const text = await response.text();
+            let data = {};
+            try { data = text ? JSON.parse(text) : {}; } catch {}
+
+            return { response, data, text };
+          }
+
+          async function ok(path, method="GET", body=null, token=null, headers={}) {
+            const result = await call(path, method, body, token, headers);
+            if (!result.response.ok) {
+              throw new Error(method + " " + path + " -> " + result.response.status + " " + result.text);
+            }
+            return result;
+          }
+
+          const setup = await call(
+            "/api/setup/user",
+            "POST",
+            {
+              username,
+              name: displayName,
+              password,
+              role: "admin"
+            },
+            null,
+            { "x-setup-key": setupKey }
+          );
+          assert(setup.response.status === 201, "setup user failed");
+          const token = setup.data.token;
+          assert(token, "token missing");
+
+          const health = await ok("/api/health");
+          assert(health.data.offline_sync === "ready", "offline schema not ready");
+
+          const shift = await ok(
+            "/api/shifts/open",
+            "POST",
+            { opening_cash: 100000 },
+            token
+          );
+          assert(shift.data.shift && shift.data.shift.status === "open", "shift missing");
+
+          const table = await ok(
+            "/api/tables",
+            "POST",
+            { name: tableName },
+            token
+          );
+
+          const service = await ok(
+            "/api/catalog",
+            "POST",
+            {
+              type: "service",
+              name: serviceName,
+              price: 10000,
+              cost: 2500
+            },
+            token
+          );
+
+          const payload = {
+            operation_id: operationId,
+            table_id: table.data.id,
+            offline_created_at: new Date().toISOString(),
+            items: [
+              {
+                catalog_type: "service",
+                catalog_id: service.data.id,
+                qty: 2
+              }
+            ]
+          };
+
+          const first = await ok(
+            "/api/offline/orders/sync",
+            "POST",
+            payload,
+            token,
+            { "x-offline-operation-id": operationId }
+          );
+          assert(first.data.synced === true, "first offline sync failed");
+          assert(first.data.totals.total === 20000, "offline order total mismatch");
+
+          const second = await ok(
+            "/api/offline/orders/sync",
+            "POST",
+            payload,
+            token,
+            { "x-offline-operation-id": operationId }
+          );
+          assert(
+            Number(second.data.order_id) === Number(first.data.order_id),
+            "idempotent replay returned another order"
+          );
+          assert(
+            second.response.headers.get("x-offline-replayed") === "1",
+            "idempotent replay header missing"
+          );
+
+          const detail = await ok(
+            "/api/orders/" + first.data.order_id,
+            "GET",
+            null,
+            token
+          );
+          assert(detail.data.order.total === 20000, "synced detail total mismatch");
+          assert(detail.data.items.length === 1, "offline order duplicated items");
+          assert(detail.data.items[0].qty === 2, "offline item quantity mismatch");
+
+          const conflictOperation = "draft-" + suffix + "-conflict";
+          const conflict = await call(
+            "/api/offline/orders/sync",
+            "POST",
+            {
+              operation_id: conflictOperation,
+              table_id: table.data.id,
+              items: [
+                {
+                  catalog_type: "service",
+                  catalog_id: service.data.id,
+                  qty: 1
+                }
+              ]
+            },
+            token,
+            { "x-offline-operation-id": conflictOperation }
+          );
+          assert(conflict.response.status === 409, "table conflict should be HTTP 409");
+          assert(
+            conflict.data.error === "offline_table_conflict",
+            "wrong offline conflict error"
+          );
+
+          console.log("OFFLINE_SYNC_E2E_OK", {
+            cacheContract: true,
+            orderSync: true,
+            idempotency: true,
+            duplicateProtection: true,
+            tableConflict: true
+          });
+          NODE
+
+      - name: Cleanup offline E2E records
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUFFIX="${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}"
+          USERNAME="offline${SUFFIX}"
+          TABLE_NAME="OFFLINE-${SUFFIX}"
+          SERVICE_NAME="Offline-Service-${SUFFIX}"
+
+          SQL="
+          DELETE FROM customer_ledger WHERE order_id IN (
+            SELECT o.id FROM orders o
+            JOIN cafe_tables t ON t.id=o.table_id
+            WHERE t.name='$TABLE_NAME'
+          );
+          DELETE FROM payments WHERE order_id IN (
+            SELECT o.id FROM orders o
+            JOIN cafe_tables t ON t.id=o.table_id
+            WHERE t.name='$TABLE_NAME'
+          );
+          DELETE FROM inventory_movements WHERE order_id IN (
+            SELECT o.id FROM orders o
+            JOIN cafe_tables t ON t.id=o.table_id
+            WHERE t.name='$TABLE_NAME'
+          );
+          DELETE FROM order_items WHERE order_id IN (
+            SELECT o.id FROM orders o
+            JOIN cafe_tables t ON t.id=o.table_id
+            WHERE t.name='$TABLE_NAME'
+          );
+          DELETE FROM audit_logs WHERE user_id IN (
+            SELECT id FROM users WHERE username='$USERNAME'
+          );
+          DELETE FROM orders WHERE table_id IN (
+            SELECT id FROM cafe_tables WHERE name='$TABLE_NAME'
+          );
+          DELETE FROM cafe_tables WHERE name='$TABLE_NAME';
+          DELETE FROM service_catalog WHERE name='$SERVICE_NAME';
+          DELETE FROM offline_operations WHERE user_id IN (
+            SELECT id FROM users WHERE username='$USERNAME'
+          );
+          DELETE FROM cash_shifts WHERE user_id IN (
+            SELECT id FROM users WHERE username='$USERNAME'
+          );
+          DELETE FROM sessions WHERE user_id IN (
+            SELECT id FROM users WHERE username='$USERNAME'
+          );
+          DELETE FROM users WHERE username='$USERNAME';
+          "
+
+          npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --command "$SQL"
