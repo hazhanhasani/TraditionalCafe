@@ -55,6 +55,9 @@
             android:name=".ReceiptActivity"
             android:exported="false" />
         <activity
+            android:name=".ReceiptSettingsActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity
