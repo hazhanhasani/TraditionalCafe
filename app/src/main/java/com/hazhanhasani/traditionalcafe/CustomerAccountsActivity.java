@@ -358,13 +358,21 @@ public class CustomerAccountsActivity extends Activity {
         box.addView(phone);
         box.addView(notes);
 
-        TextView openingTitle = text("مانده قبلی", 13, ink, true);
+        TextView openingTitle = text("بدهی قبلی مشتری", 14, brown, true);
         openingTitle.setGravity(Gravity.RIGHT);
-        openingTitle.setPadding(dp(4), dp(4), dp(4), dp(7));
+        openingTitle.setPadding(dp(4), dp(8), dp(4), dp(7));
         box.addView(openingTitle);
 
+        TextView openingHint = text(
+                "اگر این مشتری از قبل بدهکار بوده، مانده قبلی را اینجا ثبت کن. این مبلغ جدا از فروش‌های جدید در گردش حساب ثبت می‌شود.",
+                10, muted, false
+        );
+        openingHint.setGravity(Gravity.RIGHT);
+        openingHint.setPadding(dp(4), 0, dp(4), dp(8));
+        box.addView(openingHint);
+
         EditText openingDebt = numberField(
-                "بدهی قبلی (تومان) • صفر = بدون بدهی قبلی",
+                "مبلغ بدهی قبلی (تومان) • صفر = بدون بدهی",
                 "0"
         );
         EditText openingAgeDays = numberField(
