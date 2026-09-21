@@ -1549,6 +1549,80 @@ async function route(request, env) {
     });
   }
 
+  if (path === "/api/receipt-settings" && method === "GET") {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "تنظیمات رسید فقط برای مدیر قابل دسترسی است.", 403);
+    }
+
+    const rows = await env.DB.prepare(
+      `SELECT key,value
+       FROM app_settings
+       WHERE key IN ('receipt_business_name','receipt_phone','receipt_address','receipt_footer')`
+    ).all();
+
+    const settings = {
+      business_name: "کافه سنتی",
+      phone: "",
+      address: "",
+      footer: "از همراهی شما سپاسگزاریم."
+    };
+
+    for (const row of rows.results || []) {
+      if (row.key === "receipt_business_name") settings.business_name = row.value || settings.business_name;
+      if (row.key === "receipt_phone") settings.phone = row.value || "";
+      if (row.key === "receipt_address") settings.address = row.value || "";
+      if (row.key === "receipt_footer") settings.footer = row.value || settings.footer;
+    }
+
+    return json({ ok:true, settings });
+  }
+
+  if (path === "/api/receipt-settings" && (method === "PATCH" || method === "PUT")) {
+    if (!requireRole(user, ["admin"])) {
+      return error("forbidden", "تنظیمات رسید فقط برای مدیر قابل تغییر است.", 403);
+    }
+
+    const data = await bodyJson(request);
+    const values = {
+      receipt_business_name: String(data.business_name || "").trim().slice(0, 100),
+      receipt_phone: String(data.phone || "").trim().slice(0, 50),
+      receipt_address: String(data.address || "").trim().slice(0, 240),
+      receipt_footer: String(data.footer || "").trim().slice(0, 240)
+    };
+
+    if (values.receipt_business_name.length < 2) {
+      return error("invalid_business_name", "نام مجموعه برای رسید معتبر نیست.");
+    }
+    if (!values.receipt_footer) {
+      values.receipt_footer = "از همراهی شما سپاسگزاریم.";
+    }
+
+    const statements = Object.entries(values).map(([key,value]) =>
+      env.DB.prepare(
+        `INSERT INTO app_settings(key,value,updated_at)
+         VALUES (?,?,CURRENT_TIMESTAMP)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`
+      ).bind(key,value)
+    );
+
+    await env.DB.batch(statements);
+    await audit(env, user.id, "update_receipt_settings", "app_settings", null, {
+      business_name: values.receipt_business_name,
+      has_phone: Boolean(values.receipt_phone),
+      has_address: Boolean(values.receipt_address)
+    });
+
+    return json({
+      ok:true,
+      settings:{
+        business_name:values.receipt_business_name,
+        phone:values.receipt_phone,
+        address:values.receipt_address,
+        footer:values.receipt_footer
+      }
+    });
+  }
+
   if (path === "/api/dashboard" && method === "GET") {
     const iranToday = iranDateKey();
 
