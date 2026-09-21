@@ -13,6 +13,7 @@ const JSON_HEADERS = {
 const encoder = new TextEncoder();
 const PASSWORD_KDF_ITERATIONS = 5000;
 const IRAN_TIME_ZONE = "Asia/Tehran";
+const API_VERSION = "1.3.0";
 const ROLE_PERMISSION_KEYS = [
   "view_all_orders",
   "manage_catalog",
@@ -913,7 +914,14 @@ async function route(request, env) {
   }
 
   if (path === "/" && method === "GET") {
-    return json({ ok: true, name: "TraditionalCafe API", version: "1.0.0", health: "/api/health" });
+    return json({
+      ok: true,
+      name: "TraditionalCafe API",
+      version: API_VERSION,
+      status: "ready",
+      health: "/api/health",
+      time: "/api/time"
+    });
   }
 
   if (path === "/api/health" && method === "GET") {
@@ -924,6 +932,7 @@ async function route(request, env) {
     return json({
       ok: true,
       service: "TraditionalCafe API",
+      version: API_VERSION,
       database: db?.ok === 1 ? "ready" : "unknown",
       timezone: IRAN_TIME_ZONE,
       backup_recovery: Number(backupSchema?.count || 0) === 2 ? "ready" : "migration_pending",
@@ -1530,7 +1539,7 @@ async function route(request, env) {
     return json({
       ok: true,
       service: "TraditionalCafe API",
-      worker_version: "1.2.0",
+      worker_version: API_VERSION,
       database: "ready",
       timezone: IRAN_TIME_ZONE,
       utc_now: new Date().toISOString(),
