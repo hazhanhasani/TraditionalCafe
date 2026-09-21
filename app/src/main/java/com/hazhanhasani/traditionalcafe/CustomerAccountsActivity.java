@@ -340,20 +340,56 @@ public class CustomerAccountsActivity extends Activity {
 
     private void showAddCustomer() {
         LinearLayout box = dialogBox();
+
+        TextView help = text(
+                "اگر مشتری از قبل بدهکار است، مبلغ مانده قبلی را همین‌جا وارد کن تا از اولین روز داخل دفتر حساب ثبت شود.",
+                11, muted, false
+        );
+        help.setGravity(Gravity.RIGHT);
+        help.setPadding(dp(4), 0, dp(4), dp(10));
+        box.addView(help);
+
         EditText name = field("نام مشتری", false);
         EditText phone = field("شماره تماس", false);
         phone.setInputType(InputType.TYPE_CLASS_PHONE);
-        EditText notes = field("یادداشت", false);
+        EditText notes = field("یادداشت مشتری", false);
 
         box.addView(name);
         box.addView(phone);
         box.addView(notes);
+
+        TextView openingTitle = text("مانده قبلی", 13, ink, true);
+        openingTitle.setGravity(Gravity.RIGHT);
+        openingTitle.setPadding(dp(4), dp(4), dp(4), dp(7));
+        box.addView(openingTitle);
+
+        EditText openingDebt = numberField(
+                "بدهی قبلی (تومان) • صفر = بدون بدهی قبلی",
+                "0"
+        );
+        EditText openingAgeDays = numberField(
+                "چند روز از بدهی قبلی گذشته؟ • صفر = امروز",
+                "0"
+        );
+        EditText openingDebtNote = field(
+                "توضیح بدهی قبلی؛ مثلاً مانده دفتر قدیمی",
+                false
+        );
+
+        box.addView(openingDebt);
+        box.addView(openingAgeDays);
+        box.addView(openingDebtNote);
 
         EditText limit = null;
         EditText due = null;
         boolean canManage = PermissionStore.has(this, "manage_customer_limits");
 
         if (canManage) {
+            TextView creditTitle = text("تنظیمات اعتبار", 13, ink, true);
+            creditTitle.setGravity(Gravity.RIGHT);
+            creditTitle.setPadding(dp(4), dp(5), dp(4), dp(7));
+            box.addView(creditTitle);
+
             limit = numberField("سقف اعتبار (تومان) • صفر = بدون سقف", "0");
             due = numberField("مهلت پرداخت (روز) • صفر = بدون سررسید", "30");
             box.addView(limit);
@@ -363,22 +399,58 @@ public class CustomerAccountsActivity extends Activity {
         final EditText finalLimit = limit;
         final EditText finalDue = due;
 
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(box);
+        scroll.setFillViewport(true);
+
         new AlertDialog.Builder(this)
                 .setTitle("مشتری دفتری جدید")
-                .setView(box)
+                .setView(scroll)
                 .setPositiveButton("ثبت", (d,w) -> new Thread(() -> {
                     try {
+                        long debtValue = parseLong(openingDebt.getText().toString());
+                        long ageDaysValue = parseLong(openingAgeDays.getText().toString());
+
                         JSONObject body = new JSONObject();
                         body.put("name", name.getText().toString().trim());
                         body.put("phone", phone.getText().toString().trim());
                         body.put("notes", notes.getText().toString().trim());
+                        body.put("opening_debt", debtValue);
+                        body.put("opening_debt_age_days", ageDaysValue);
+                        body.put(
+                                "opening_debt_note",
+                                openingDebtNote.getText().toString().trim()
+                        );
+
                         if (canManage) {
-                            body.put("credit_limit", parseLong(finalLimit.getText().toString()));
-                            body.put("due_days", parseLong(finalDue.getText().toString()));
+                            body.put(
+                                    "credit_limit",
+                                    parseLong(finalLimit.getText().toString())
+                            );
+                            body.put(
+                                    "due_days",
+                                    parseLong(finalDue.getText().toString())
+                            );
                         }
-                        ApiClient.post(this, "/api/customers", body);
+
+                        JSONObject response = ApiClient.post(
+                                this,
+                                "/api/customers",
+                                body
+                        );
+
                         runOnUiThread(() -> {
-                            Toast.makeText(this, "مشتری دفتری ثبت شد.", Toast.LENGTH_SHORT).show();
+                            long savedDebt =
+                                    response.optLong("opening_debt", 0L);
+                            Toast.makeText(
+                                    this,
+                                    savedDebt > 0
+                                            ? "مشتری با بدهی قبلی " +
+                                              money(savedDebt) +
+                                              " ثبت شد."
+                                            : "مشتری دفتری ثبت شد.",
+                                    Toast.LENGTH_LONG
+                            ).show();
                             reload();
                         });
                     } catch (Exception e) {
