@@ -157,6 +157,7 @@ jobs:
           );
           DELETE FROM service_catalog WHERE name IN ('$DRINK','$FOOD');
           DELETE FROM catalog_categories WHERE name IN ('$DRINK_CATEGORY','$FOOD_CATEGORY');
+          DELETE FROM backup_snapshots WHERE created_by IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM cash_shifts WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
           DELETE FROM audit_logs WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
