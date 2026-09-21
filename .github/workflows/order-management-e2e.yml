@@ -153,6 +153,12 @@ jobs:
           }, token);
           assert(settled.ok === true, "settlement failed");
 
+          const receipt = await request("/api/orders/" + openA.order_id + "/receipt", "GET", null, token);
+          assert(receipt.receipt && receipt.receipt.receipt_number, "receipt number missing");
+          assert(receipt.receipt.total === 50000, "receipt total mismatch");
+          assert(Array.isArray(receipt.items) && receipt.items.length > 0, "receipt items missing");
+          assert(Array.isArray(receipt.payments) && receipt.payments.length > 0, "receipt payments missing");
+
           const shiftAfterSale = await request("/api/shifts/current", "GET", null, token);
           assert(shiftAfterSale.shift.cash_sales === 50000, "shift cash sales mismatch");
           assert(shiftAfterSale.shift.expected_cash_live === 150000, "shift expected cash after sale mismatch");
