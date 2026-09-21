@@ -1317,7 +1317,6 @@ async function route(request, env) {
 
       if (
         !["hookah","drink","food","service"].includes(catalogType) ||
-        !catalogId ||
         !Number.isFinite(qty) ||
         qty <= 0 ||
         qty > 999
@@ -1328,33 +1327,63 @@ async function route(request, env) {
         );
       }
 
-      const item = catalogType === "hookah"
-        ? await env.DB.prepare(
-            "SELECT id,name,price,cost,active FROM hookah_catalog WHERE id=?"
-          ).bind(catalogId).first()
-        : await env.DB.prepare(
-            `SELECT id,name,price,cost,active,item_kind
-             FROM service_catalog
-             WHERE id=? AND item_kind=?`
-          ).bind(catalogId,catalogType).first();
+      if (catalogId > 0) {
+        const item = catalogType === "hookah"
+          ? await env.DB.prepare(
+              "SELECT id,name,price,cost,active FROM hookah_catalog WHERE id=?"
+            ).bind(catalogId).first()
+          : await env.DB.prepare(
+              `SELECT id,name,price,cost,active,item_kind
+               FROM service_catalog
+               WHERE id=? AND item_kind=?`
+            ).bind(catalogId,catalogType).first();
 
-      if (!item || Number(item.active) !== 1) {
+        if (!item || Number(item.active) !== 1) {
+          return error(
+            "offline_catalog_item_changed",
+            "یکی از اقلام سفارش آفلاین دیگر در منوی فعال موجود نیست.",
+            409,
+            { catalog_type:catalogType,catalog_id:catalogId }
+          );
+        }
+
+        preparedItems.push({
+          item_type:catalogType === "hookah" ? "hookah" : "service",
+          catalog_type:catalogType,
+          catalog_id:catalogId,
+          name:item.name,
+          qty,
+          unit_price:Number(item.price || 0),
+          unit_cost:Number(item.cost || 0)
+        });
+        continue;
+      }
+
+      if (user.role === "staff") {
         return error(
-          "offline_catalog_item_changed",
-          "یکی از اقلام سفارش آفلاین دیگر در منوی فعال موجود نیست.",
-          409,
-          { catalog_type:catalogType,catalog_id:catalogId }
+          "offline_catalog_required",
+          "شاگرد در حالت آفلاین فقط می‌تواند از منوی تعریف‌شده فروش ثبت کند.",
+          403
+        );
+      }
+
+      const manualName = String(raw.name || "").trim().slice(0,100);
+      const manualPrice = intAmount(raw.unit_price);
+      if (!manualName || manualPrice === null) {
+        return error(
+          "invalid_offline_manual_item",
+          "آیتم دستی سفارش آفلاین معتبر نیست."
         );
       }
 
       preparedItems.push({
         item_type:catalogType === "hookah" ? "hookah" : "service",
         catalog_type:catalogType,
-        catalog_id:catalogId,
-        name:item.name,
+        catalog_id:null,
+        name:manualName,
         qty,
-        unit_price:Number(item.price || 0),
-        unit_cost:Number(item.cost || 0)
+        unit_price:manualPrice,
+        unit_cost:0
       });
     }
 
