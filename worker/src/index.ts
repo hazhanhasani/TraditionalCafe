@@ -1825,9 +1825,10 @@ async function route(request, env) {
     if (!requireRole(user, ["admin"])) {
       return error("forbidden", "این بخش فقط برای مدیر قابل دسترسی است.", 403);
     }
-    const counts = {};
-    const tables = [
+
+    const expectedTables = [
       "users",
+      "sessions",
       "cafe_tables",
       "orders",
       "order_items",
@@ -1837,39 +1838,174 @@ async function route(request, env) {
       "expenses",
       "hookah_catalog",
       "service_catalog",
-      "audit_logs",
+      "catalog_categories",
+      "role_permissions",
       "cash_shifts",
       "inventory_items",
       "inventory_movements",
-      "catalog_inventory_links"
+      "catalog_inventory_links",
+      "audit_logs",
+      "app_settings",
+      "backup_snapshots",
+      "backup_snapshot_chunks",
+      "offline_operations"
     ];
 
-    for (const table of tables) {
+    const counts = {};
+    const missingTables = [];
+
+    for (const table of expectedTables) {
       try {
-        const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first();
+        const exists = await env.DB.prepare(
+          "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name=? LIMIT 1"
+        ).bind(table).first();
+
+        if (!exists) {
+          counts[table] = null;
+          missingTables.push(table);
+          continue;
+        }
+
+        const row = await env.DB.prepare(
+          `SELECT COUNT(*) AS count FROM ${table}`
+        ).first();
         counts[table] = Number(row?.count || 0);
-      } catch (e) {
+      } catch {
         counts[table] = null;
+        if (!missingTables.includes(table)) missingTables.push(table);
       }
     }
 
     const settings = await env.DB.prepare(
-      "SELECT key, value FROM app_settings WHERE key IN ('timezone','calendar','currency') ORDER BY key"
+      `SELECT key,value
+       FROM app_settings
+       WHERE key IN (
+         'timezone','calendar','currency',
+         'receipt_business_name','receipt_phone',
+         'receipt_address','receipt_footer'
+       )
+       ORDER BY key`
     ).all();
 
-    let openOrders = 0;
+    const metrics = {
+      active_admins: 0,
+      open_orders: 0,
+      open_shifts: 0,
+      pending_offline_operations: 0,
+      failed_backups: 0,
+      test_users: 0,
+      test_tables: 0,
+      test_customers: 0,
+      test_expenses: 0,
+      test_catalog: 0
+    };
+
+    try {
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM users WHERE role='admin' AND active=1"
+      ).first();
+      metrics.active_admins = Number(row?.count || 0);
+    } catch {}
+
     try {
       const row = await env.DB.prepare(
         "SELECT COUNT(*) AS count FROM orders WHERE status='open'"
       ).first();
-      openOrders = Number(row?.count || 0);
-    } catch (e) {}
+      metrics.open_orders = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM cash_shifts WHERE status='open'"
+      ).first();
+      metrics.open_shifts = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM offline_operations WHERE status='processing'"
+      ).first();
+      metrics.pending_offline_operations = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM backup_snapshots WHERE status='failed'"
+      ).first();
+      metrics.failed_backups = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM users
+         WHERE username GLOB 'e2e[0-9]*'
+            OR username GLOB 'menu[0-9]*'
+            OR username GLOB 'offline[0-9]*'`
+      ).first();
+      metrics.test_users = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM cafe_tables
+         WHERE name LIKE 'E2E-%' OR name LIKE 'OFFLINE-%'`
+      ).first();
+      metrics.test_tables = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM customers WHERE name LIKE 'E2E-Customer-%'"
+      ).first();
+      metrics.test_customers = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM expenses
+         WHERE category='E2E' OR description LIKE 'E2E expense %'`
+      ).first();
+      metrics.test_expenses = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        `SELECT COUNT(*) AS count
+         FROM service_catalog
+         WHERE name LIKE 'E2E-%' OR name LIKE 'Offline-Service-%'`
+      ).first();
+      metrics.test_catalog = Number(row?.count || 0);
+    } catch {}
+
+    const testResidue =
+      metrics.test_users +
+      metrics.test_tables +
+      metrics.test_customers +
+      metrics.test_expenses +
+      metrics.test_catalog;
+
+    const warnings = [];
+    if (missingTables.length > 0) {
+      warnings.push("migration_missing_tables");
+    }
+    if (metrics.active_admins < 1) {
+      warnings.push("no_active_admin");
+    }
+    if (metrics.failed_backups > 0) {
+      warnings.push("failed_backups");
+    }
+    if (testResidue > 0) {
+      warnings.push("production_e2e_residue");
+    }
 
     return json({
       ok: true,
       service: "TraditionalCafe API",
       worker_version: API_VERSION,
-      database: "ready",
+      database: missingTables.length === 0 ? "ready" : "migration_pending",
       timezone: IRAN_TIME_ZONE,
       utc_now: new Date().toISOString(),
       iran_now: iranIsoLike(),
@@ -1879,11 +2015,34 @@ async function route(request, env) {
         id: user.id,
         username: user.username,
         name: user.name,
-        role: user.role,
+        role: user.role
+      },
+      schema: {
+        expected_tables: expectedTables.length,
+        missing_tables: missingTables,
+        backup_recovery:
+          counts.backup_snapshots !== null &&
+          counts.backup_snapshot_chunks !== null
+            ? "ready"
+            : "migration_pending",
+        offline_sync:
+          counts.offline_operations !== null
+            ? "ready"
+            : "migration_pending"
+      },
+      metrics,
+      production_test_residue: {
+        total: testResidue,
+        users: metrics.test_users,
+        tables: metrics.test_tables,
+        customers: metrics.test_customers,
+        expenses: metrics.test_expenses,
+        catalog: metrics.test_catalog,
+        clean: testResidue === 0
       },
       counts,
-      open_orders: openOrders,
       settings: settings.results || [],
+      warnings
     });
   }
 
