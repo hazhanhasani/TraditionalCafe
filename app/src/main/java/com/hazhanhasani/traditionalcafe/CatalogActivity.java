@@ -669,8 +669,8 @@ public class CatalogActivity extends Activity {
     }
 
     private EditText field(String hint, boolean number) {
-        EditText e = new LabeledEditText(this);
-        e.setHint(hint);
+        LabeledEditText e = new LabeledEditText(this);
+        e.setFieldLabel(hint);
         e.setTextSize(14);
         e.setTextColor(ink);
         e.setHintTextColor(muted);
