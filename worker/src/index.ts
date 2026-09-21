@@ -7,7 +7,7 @@ const JSON_HEADERS = {
   "cache-control": "no-store",
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
-  "access-control-allow-headers": "content-type,authorization,x-setup-key",
+  "access-control-allow-headers": "content-type,authorization,x-setup-key,x-offline-operation-id",
 };
 
 const encoder = new TextEncoder();
@@ -356,7 +356,8 @@ const BACKUP_EXCLUDED_TABLES = new Set([
   "backup_snapshots",
   "backup_snapshot_chunks",
   "d1_migrations",
-  "sessions"
+  "sessions",
+  "offline_operations"
 ]);
 
 function backupId() {
@@ -886,6 +887,109 @@ async function buildShiftSummary(env, shift) {
   };
 }
 
+function validOfflineOperationId(value) {
+  return /^[A-Za-z0-9._:-]{8,120}$/.test(String(value || ""));
+}
+
+async function routeWithOfflineIdempotency(request, env) {
+  const method = String(request.method || "GET").toUpperCase();
+  const operationId = String(
+    request.headers.get("x-offline-operation-id") || ""
+  ).trim();
+
+  if (!operationId || !["POST","PATCH","DELETE"].includes(method)) {
+    return await route(request, env);
+  }
+
+  if (!validOfflineOperationId(operationId)) {
+    return error(
+      "invalid_offline_operation_id",
+      "شناسه عملیات آفلاین معتبر نیست.",
+      400
+    );
+  }
+
+  const user = await auth(request, env);
+  if (!user) {
+    return await route(request, env);
+  }
+
+  const url = new URL(request.url);
+  const operationPath = url.pathname + url.search;
+
+  const reserved = await env.DB.prepare(
+    `INSERT OR IGNORE INTO offline_operations
+     (user_id,operation_id,method,path,status)
+     VALUES (?,?,?,?, 'processing')`
+  ).bind(user.id, operationId, method, operationPath).run();
+
+  if (Number(reserved?.meta?.changes || 0) === 0) {
+    const previous = await env.DB.prepare(
+      `SELECT status,response_status,response_body
+       FROM offline_operations
+       WHERE user_id=? AND operation_id=?`
+    ).bind(user.id, operationId).first();
+
+    if (previous && previous.status === "done") {
+      const headers = {
+        ...JSON_HEADERS,
+        "x-offline-replayed": "1"
+      };
+      return new Response(
+        previous.response_body || "{}",
+        {
+          status: Number(previous.response_status || 200),
+          headers
+        }
+      );
+    }
+
+    return error(
+      "offline_operation_processing",
+      "این عملیات در حال همگام‌سازی است؛ دوباره تلاش کنید.",
+      409
+    );
+  }
+
+  try {
+    const response = await route(request, env);
+
+    if (response.status >= 200 && response.status < 300) {
+      const body = await response.clone().text();
+      await env.DB.prepare(
+        `UPDATE offline_operations
+         SET status='done',response_status=?,response_body=?,
+             updated_at=CURRENT_TIMESTAMP
+         WHERE user_id=? AND operation_id=?`
+      ).bind(
+        response.status,
+        body,
+        user.id,
+        operationId
+      ).run();
+
+      await env.DB.prepare(
+        `DELETE FROM offline_operations
+         WHERE status='done'
+           AND created_at < datetime('now','-30 days')`
+      ).run();
+    } else {
+      await env.DB.prepare(
+        "DELETE FROM offline_operations WHERE user_id=? AND operation_id=?"
+      ).bind(user.id, operationId).run();
+    }
+
+    return response;
+  } catch (e) {
+    try {
+      await env.DB.prepare(
+        "DELETE FROM offline_operations WHERE user_id=? AND operation_id=?"
+      ).bind(user.id, operationId).run();
+    } catch {}
+    throw e;
+  }
+}
+
 async function recalcOrder(env, orderId) {
   const totals = await env.DB.prepare(
     "SELECT COALESCE(SUM(qty * unit_price),0) AS subtotal FROM order_items WHERE order_id = ?",
@@ -929,6 +1033,9 @@ async function route(request, env) {
     const backupSchema = await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('backup_snapshots','backup_snapshot_chunks')"
     ).first();
+    const offlineSchema = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='offline_operations'"
+    ).first();
     return json({
       ok: true,
       service: "TraditionalCafe API",
@@ -936,6 +1043,7 @@ async function route(request, env) {
       database: db?.ok === 1 ? "ready" : "unknown",
       timezone: IRAN_TIME_ZONE,
       backup_recovery: Number(backupSchema?.count || 0) === 2 ? "ready" : "migration_pending",
+      offline_sync: Number(offlineSchema?.count || 0) === 1 ? "ready" : "migration_pending",
     });
   }
 
@@ -1119,6 +1227,198 @@ async function route(request, env) {
       user,
       permissions: await rolePermissions(env, user.role),
     });
+  }
+
+  if (path === "/api/offline/orders/sync" && method === "POST") {
+    const data = await bodyJson(request);
+    const operationId = String(
+      request.headers.get("x-offline-operation-id") ||
+      data.operation_id ||
+      ""
+    ).trim();
+    const tableId = Number(data.table_id || 0);
+    const rawItems = Array.isArray(data.items) ? data.items : [];
+
+    if (!validOfflineOperationId(operationId)) {
+      return error(
+        "invalid_offline_operation_id",
+        "شناسه سفارش آفلاین معتبر نیست."
+      );
+    }
+    if (!tableId) {
+      return error("invalid_table", "میز سفارش آفلاین معتبر نیست.");
+    }
+    if (rawItems.length === 0 || rawItems.length > 100) {
+      return error(
+        "invalid_offline_items",
+        "سفارش آفلاین باید حداقل یک و حداکثر ۱۰۰ آیتم داشته باشد."
+      );
+    }
+
+    const already = await env.DB.prepare(
+      `SELECT id,table_id,subtotal,discount,total,status
+       FROM orders
+       WHERE offline_operation_id=?
+       LIMIT 1`
+    ).bind(operationId).first();
+
+    if (already) {
+      return json({
+        ok:true,
+        resumed:true,
+        order_id:Number(already.id),
+        table_id:Number(already.table_id),
+        status:already.status,
+        totals:{
+          subtotal:Number(already.subtotal || 0),
+          discount:Number(already.discount || 0),
+          total:Number(already.total || 0)
+        }
+      });
+    }
+
+    const table = await env.DB.prepare(
+      "SELECT id,name,active FROM cafe_tables WHERE id=?"
+    ).bind(tableId).first();
+    if (!table || Number(table.active) !== 1) {
+      return error("table_not_found", "میز سفارش آفلاین پیدا نشد.", 404);
+    }
+
+    const occupied = await env.DB.prepare(
+      `SELECT id,opened_by
+       FROM orders
+       WHERE table_id=? AND status='open'
+       LIMIT 1`
+    ).bind(tableId).first();
+
+    if (occupied) {
+      return error(
+        "offline_table_conflict",
+        "این میز بعد از قطع اینترنت دارای سفارش دیگری شده است؛ سفارش آفلاین نیاز به بررسی دارد.",
+        409,
+        { existing_order_id:Number(occupied.id) }
+      );
+    }
+
+    const shift = await getOpenShift(env, user.id);
+    if (!shift) {
+      return error(
+        "shift_required",
+        "برای همگام‌سازی سفارش آفلاین باید شیفت کاربر باز باشد.",
+        409
+      );
+    }
+
+    const preparedItems = [];
+    for (const raw of rawItems) {
+      const catalogType = String(raw.catalog_type || "").toLowerCase();
+      const catalogId = Number(raw.catalog_id || 0);
+      const qty = Math.round(Number(raw.qty || 0));
+
+      if (
+        !["hookah","drink","food","service"].includes(catalogType) ||
+        !catalogId ||
+        !Number.isFinite(qty) ||
+        qty <= 0 ||
+        qty > 999
+      ) {
+        return error(
+          "invalid_offline_item",
+          "یکی از آیتم‌های سفارش آفلاین معتبر نیست."
+        );
+      }
+
+      const item = catalogType === "hookah"
+        ? await env.DB.prepare(
+            "SELECT id,name,price,cost,active FROM hookah_catalog WHERE id=?"
+          ).bind(catalogId).first()
+        : await env.DB.prepare(
+            `SELECT id,name,price,cost,active,item_kind
+             FROM service_catalog
+             WHERE id=? AND item_kind=?`
+          ).bind(catalogId,catalogType).first();
+
+      if (!item || Number(item.active) !== 1) {
+        return error(
+          "offline_catalog_item_changed",
+          "یکی از اقلام سفارش آفلاین دیگر در منوی فعال موجود نیست.",
+          409,
+          { catalog_type:catalogType,catalog_id:catalogId }
+        );
+      }
+
+      preparedItems.push({
+        item_type:catalogType === "hookah" ? "hookah" : "service",
+        catalog_type:catalogType,
+        catalog_id:catalogId,
+        name:item.name,
+        qty,
+        unit_price:Number(item.price || 0),
+        unit_cost:Number(item.cost || 0)
+      });
+    }
+
+    let orderId = 0;
+    try {
+      const result = await env.DB.prepare(
+        `INSERT INTO orders
+         (table_id,opened_by,opened_shift_id,offline_operation_id,notes)
+         VALUES (?,?,?,?,?)`
+      ).bind(
+        tableId,
+        user.id,
+        shift.id,
+        operationId,
+        data.note ? String(data.note).slice(0,500) : null
+      ).run();
+
+      orderId = Number(result.meta.last_row_id);
+
+      const statements = preparedItems.map((item) =>
+        env.DB.prepare(
+          `INSERT INTO order_items
+           (order_id,item_type,catalog_id,catalog_kind,name,qty,unit_price,unit_cost,created_by)
+           VALUES (?,?,?,?,?,?,?,?,?)`
+        ).bind(
+          orderId,
+          item.item_type,
+          item.catalog_id,
+          item.catalog_type,
+          item.name,
+          item.qty,
+          item.unit_price,
+          item.unit_cost,
+          user.id
+        )
+      );
+
+      if (statements.length) await env.DB.batch(statements);
+      const totals = await recalcOrder(env, orderId);
+
+      await audit(env,user.id,"sync_offline_order","order",orderId,{
+        table_id:tableId,
+        operation_id:operationId,
+        item_count:preparedItems.length,
+        offline_created_at:data.offline_created_at || null
+      });
+
+      return json({
+        ok:true,
+        synced:true,
+        order_id:orderId,
+        table_id:tableId,
+        totals,
+        warnings:[]
+      },201);
+    } catch (e) {
+      if (orderId > 0) {
+        try {
+          await env.DB.prepare("DELETE FROM order_items WHERE order_id=?").bind(orderId).run();
+          await env.DB.prepare("DELETE FROM orders WHERE id=?").bind(orderId).run();
+        } catch {}
+      }
+      throw e;
+    }
   }
 
   if (path === "/api/shifts/current" && method === "GET") {
@@ -4847,7 +5147,7 @@ async function route(request, env) {
 export default {
   async fetch(request, env) {
     try {
-      return await route(request, env);
+      return await routeWithOfflineIdempotency(request, env);
     } catch (e) {
       console.error(e);
       return error("internal_error", "Unexpected server error.", 500);
