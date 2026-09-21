@@ -136,17 +136,26 @@ public class DebugActivity extends Activity {
 
             collector.add(checkLocalApp());
             collector.add(checkSession());
+            collector.add(checkFormStandard());
+            collector.add(checkOfflineState());
             collector.add(checkIranClock());
             collector.add(checkApi("/api/health", "Worker و D1"));
             collector.add(checkApi("/api/time", "زمان سرور ایران"));
-            collector.add(checkApi("/api/debug", "دیاگ بک‌اند"));
+            collector.add(checkApi("/api/debug", "دیاگ کامل بک‌اند"));
             collector.add(checkApi("/api/dashboard", "داشبورد"));
             collector.add(checkApi("/api/shifts/current", "شیفت و صندوق"));
             collector.add(checkApi("/api/tables", "میزها"));
-            collector.add(checkApi("/api/catalog?type=hookah", "کاتالوگ قلیان"));
-            collector.add(checkApi("/api/catalog?type=service", "کاتالوگ خدمات"));
+            collector.add(checkApi("/api/catalog?type=hookah", "منوی قلیان"));
+            collector.add(checkApi("/api/catalog?type=drink", "منوی نوشیدنی"));
+            collector.add(checkApi("/api/catalog?type=food", "منوی غذا"));
+            collector.add(checkApi("/api/catalog?type=service", "منوی خدمات"));
             collector.add(checkApi("/api/customers", "حساب دفتری"));
             collector.add(checkApi("/api/expenses", "هزینه‌ها"));
+            collector.add(checkApi("/api/inventory", "انبار"));
+            collector.add(checkApi("/api/audit?limit=1", "مرکز Audit"));
+            collector.add(checkApi("/api/backups?limit=1", "پشتیبان و بازیابی"));
+            collector.add(checkApi("/api/receipt-settings", "تنظیمات رسید"));
+            collector.add(checkApi("/api/role-permissions", "مجوز نقش‌ها"));
             collector.add(checkUpdateManifest());
 
             for (TestResult result : collector.results) {
@@ -208,6 +217,56 @@ public class DebugActivity extends Activity {
         return ok("نشست کاربر", user + " • " + role + " • token=ذخیره‌شده");
     }
 
+    private TestResult checkFormStandard() {
+        try {
+            String standard = LabeledEditText.FORM_STANDARD;
+            if (!"persistent-labels-v1".equals(standard)) {
+                return fail(
+                        "استاندارد فرم‌ها",
+                        "نسخه استاندارد Label ثابت شناخته نشد."
+                );
+            }
+            return ok(
+                    "استاندارد فرم‌ها",
+                    "توضیح فیلدها خارج از کادر و ثابت می‌ماند • " + standard
+            );
+        } catch (Exception e) {
+            return fail("استاندارد فرم‌ها", e.getMessage());
+        }
+    }
+
+    private TestResult checkOfflineState() {
+        try {
+            boolean online = OfflineSyncManager.isOnline(this);
+            int queued =
+                    OfflineStore.pendingCount(this) +
+                    OfflineStore.pendingDraftCount(this);
+            int failed = OfflineStore.failedCount(this);
+            int cache = OfflineStore.cacheCount(this);
+            long lastSync = OfflineSyncManager.lastSync(this);
+
+            String detail =
+                    (online ? "آنلاین" : "آفلاین") +
+                    " • صف=" + JalaliDateTime.fa(String.valueOf(queued)) +
+                    " • خطا=" + JalaliDateTime.fa(String.valueOf(failed)) +
+                    " • Cache=" + JalaliDateTime.fa(String.valueOf(cache));
+
+            if (lastSync > 0L) {
+                detail +=
+                        " • آخرین Sync=" +
+                        JalaliDateTime.formatUtcCompact(
+                                java.time.Instant.ofEpochMilli(lastSync).toString()
+                        );
+            }
+
+            return failed == 0
+                    ? ok("حالت آفلاین و Sync", detail)
+                    : fail("حالت آفلاین و Sync", detail);
+        } catch (Exception e) {
+            return fail("حالت آفلاین و Sync", e.getMessage());
+        }
+    }
+
     private TestResult checkIranClock() {
         try {
             String now = JalaliDateTime.nowFull();
@@ -219,13 +278,54 @@ public class DebugActivity extends Activity {
 
     private TestResult checkApi(String path, String label) {
         try {
-            JSONObject response = ApiClient.get(this, path);
+            JSONObject response = ApiClient.requestOnlineForSync(
+                    this,
+                    "GET",
+                    path,
+                    null,
+                    null
+            );
             if (!response.optBoolean("ok", false)) {
                 return fail(label, response.toString());
             }
 
+            if ("/api/health".equals(path)) {
+                String detail =
+                        "API " + response.optString("version", "?") +
+                        " • DB=" + response.optString("database", "?") +
+                        " • Backup=" + response.optString("backup_recovery", "?") +
+                        " • Offline=" + response.optString("offline_sync", "?");
+
+                boolean ready =
+                        "ready".equals(response.optString("database")) &&
+                        "ready".equals(response.optString("backup_recovery")) &&
+                        "ready".equals(response.optString("offline_sync"));
+
+                return ready ? ok(label, detail) : fail(label, detail);
+            }
+
             if ("/api/debug".equals(path)) {
-                return ok(label, buildDebugDetails(response));
+                JSONObject residue = response.optJSONObject(
+                        "production_test_residue"
+                );
+                JSONObject schema = response.optJSONObject("schema");
+                JSONArray warnings = response.optJSONArray("warnings");
+
+                boolean clean =
+                        residue != null &&
+                        residue.optBoolean("clean", false);
+                boolean migrations =
+                        schema != null &&
+                        schema.optJSONArray("missing_tables") != null &&
+                        schema.optJSONArray("missing_tables").length() == 0;
+                boolean noWarnings =
+                        warnings != null &&
+                        warnings.length() == 0;
+
+                String detail = buildDebugDetails(response);
+                return clean && migrations && noWarnings
+                        ? ok(label, detail)
+                        : fail(label, detail);
             }
             if ("/api/time".equals(path)) {
                 JalaliDateTime.syncServerUtc(response.optString("utc", ""));
@@ -247,11 +347,54 @@ public class DebugActivity extends Activity {
 
     private String buildDebugDetails(JSONObject response) {
         JSONObject counts = response.optJSONObject("counts");
+        JSONObject metrics = response.optJSONObject("metrics");
+        JSONObject schema = response.optJSONObject("schema");
+        JSONObject residue = response.optJSONObject("production_test_residue");
+        JSONArray warnings = response.optJSONArray("warnings");
+
         StringBuilder details = new StringBuilder();
 
         details.append(response.optString("jalali_now", ""))
                 .append("\nWorker: ")
                 .append(response.optString("worker_version", "?"));
+
+        if (schema != null) {
+            JSONArray missing = schema.optJSONArray("missing_tables");
+            details.append("\nMigration: ")
+                    .append(
+                            missing != null && missing.length() == 0
+                                    ? "سالم"
+                                    : "ناقص"
+                    )
+                    .append(" • Backup=")
+                    .append(schema.optString("backup_recovery", "?"))
+                    .append(" • Offline=")
+                    .append(schema.optString("offline_sync", "?"));
+        }
+
+        if (metrics != null) {
+            details.append("\nAdmin=")
+                    .append(metrics.optInt("active_admins", -1))
+                    .append(" • Open orders=")
+                    .append(metrics.optInt("open_orders", -1))
+                    .append(" • Open shifts=")
+                    .append(metrics.optInt("open_shifts", -1))
+                    .append(" • Pending offline=")
+                    .append(metrics.optInt("pending_offline_operations", -1))
+                    .append(" • Failed backups=")
+                    .append(metrics.optInt("failed_backups", -1));
+        }
+
+        if (residue != null) {
+            details.append("\nE2E در دیتابیس واقعی: ")
+                    .append(
+                            residue.optBoolean("clean", false)
+                                    ? "پاک"
+                                    : "داده آزمایشی پیدا شد"
+                    )
+                    .append(" • total=")
+                    .append(residue.optInt("total", -1));
+        }
 
         if (counts != null) {
             details.append("\nUsers=")
@@ -260,9 +403,14 @@ public class DebugActivity extends Activity {
                     .append(counts.optInt("cafe_tables", -1))
                     .append(" • Orders=")
                     .append(counts.optInt("orders", -1))
-                    .append(" • Open=")
-                    .append(response.optInt("open_orders", -1));
+                    .append(" • Customers=")
+                    .append(counts.optInt("customers", -1));
         }
+
+        if (warnings != null && warnings.length() > 0) {
+            details.append("\nWarnings=").append(warnings.toString());
+        }
+
         return details.toString();
     }
 
