@@ -87,6 +87,11 @@ jobs:
             exit 1
           fi
 
+          if grep -R --include='*.java' -n '\.setHint(' app/src/main/java/com/hazhanhasani/traditionalcafe --exclude='LabeledEditText.java'; then
+            echo "Form explanations must use setFieldLabel(), not disappearing hints."
+            exit 1
+          fi
+
       - name: Android lint
         run: gradle --no-daemon :app:lintRelease
 
