@@ -289,10 +289,23 @@ public class CustomerLedgerActivity extends Activity {
 
         long amount = entry.optLong("amount", 0L);
         String type = entry.optString("entry_type", "");
+        String note = entry.optString("note", "");
+        boolean openingDebt =
+                "adjustment".equals(type) &&
+                amount > 0 &&
+                (
+                        note.startsWith("بدهی قبلی") ||
+                        note.contains("مانده اولیه") ||
+                        note.contains("دفتر قدیمی")
+                );
+
         String titleText;
         int color;
 
-        if ("debt".equals(type)) {
+        if (openingDebt) {
+            titleText = "بدهی قبلی / مانده اولیه";
+            color = red;
+        } else if ("debt".equals(type)) {
             titleText = "بدهی / نسیه";
             color = red;
         } else if ("payment".equals(type)) {
@@ -323,11 +336,10 @@ public class CustomerLedgerActivity extends Activity {
             );
         }
 
-        String note = entry.optString("note", "");
         if (!note.isEmpty()) addLine(card, "توضیح", note, ink);
 
         String dueAt = entry.optString("due_at", "");
-        if ("debt".equals(type) && !dueAt.isEmpty()) {
+        if (amount > 0 && !dueAt.isEmpty()) {
             addLine(card, "سررسید", JalaliDateTime.formatUtcCompact(dueAt), brown);
         }
 
@@ -505,7 +517,18 @@ public class CustomerLedgerActivity extends Activity {
             if (entry == null) continue;
 
             String type = entry.optString("entry_type", "");
-            String label = "debt".equals(type)
+            String note = entry.optString("note", "");
+            boolean openingDebt =
+                    "adjustment".equals(type) &&
+                    entry.optLong("amount", 0L) > 0 &&
+                    (
+                            note.startsWith("بدهی قبلی") ||
+                            note.contains("مانده اولیه") ||
+                            note.contains("دفتر قدیمی")
+                    );
+            String label = openingDebt
+                    ? "بدهی قبلی"
+                    : "debt".equals(type)
                     ? "نسیه"
                     : "payment".equals(type) ? "پرداخت" : "اصلاح";
             body.append("\n")
