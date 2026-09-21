@@ -13,13 +13,11 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -45,7 +43,6 @@ public class CustomerAccountsActivity extends Activity {
     private LinearLayout content;
     private ProgressBar loading;
     private EditText search;
-    private Spinner filter;
     private JSONArray customers = new JSONArray();
     private JSONObject summary = new JSONObject();
 
@@ -86,11 +83,11 @@ public class CustomerAccountsActivity extends Activity {
         titles.setOrientation(LinearLayout.VERTICAL);
         top.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView title = text("حساب دفتری مشتریان", 21, ink, true);
+        TextView title = text("مشتریان", 21, ink, true);
         title.setGravity(Gravity.RIGHT);
         titles.addView(title);
 
-        TextView subtitle = text("بدهی و پرداخت مشتریان", 11, muted, false);
+        TextView subtitle = text("بدهی و پرداخت", 11, muted, false);
         subtitle.setGravity(Gravity.RIGHT);
         subtitle.setPadding(0, dp(4), 0, 0);
         titles.addView(subtitle);
@@ -116,33 +113,9 @@ public class CustomerAccountsActivity extends Activity {
         });
         controls.addView(search);
 
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-
-        filter = new Spinner(this);
-        filter.setAdapter(new ArrayAdapter<>(
-                this,
-                android.R.layout.simple_spinner_dropdown_item,
-                PermissionStore.has(this, "manage_customer_limits")
-                        ? new String[]{"همه مشتریان", "بدهکاران", "بدون بدهی", "غیرفعال‌ها"}
-                        : new String[]{"همه مشتریان", "بدهکاران", "بدون بدهی"}
-        ));
-        filter.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                render();
-            }
-            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
-        });
-        row.addView(filter, new LinearLayout.LayoutParams(0, dp(50), 1f));
-
-        Button add = primaryButton("+ مشتری");
+        Button add = primaryButton("+ مشتری جدید");
         add.setOnClickListener(v -> showAddCustomer());
-        LinearLayout.LayoutParams addLp = new LinearLayout.LayoutParams(dp(110), dp(50));
-        addLp.setMarginStart(dp(8));
-        row.addView(add, addLp);
-
-        controls.addView(row);
+        controls.addView(add);
         root.addView(controls);
 
         loading = new ProgressBar(this);
@@ -191,10 +164,13 @@ public class CustomerAccountsActivity extends Activity {
         loading.setVisibility(View.GONE);
         content.removeAllViews();
 
-        renderSummary();
+        String role = getSharedPreferences("session", MODE_PRIVATE)
+                .getString("role", "staff");
+        if (!"staff".equals(role)) {
+            renderSummary();
+        }
 
         String q = search == null ? "" : search.getText().toString().trim().toLowerCase();
-        int mode = filter == null ? 0 : filter.getSelectedItemPosition();
 
         int shown = 0;
         for (int i = 0; i < customers.length(); i++) {
@@ -208,19 +184,15 @@ public class CustomerAccountsActivity extends Activity {
 
             if (!q.isEmpty() && !haystack.contains(q)) continue;
 
-            long balance = customer.optLong("balance", 0L);
-
-            if (mode == 1 && balance <= 0) continue;
-            if (mode == 2 && balance != 0) continue;
-            if (mode == 3 && customer.optInt("active", 1) == 1) continue;
-            if (mode != 3 && customer.optInt("active", 1) == 0) continue;
+            boolean active = customer.optInt("active", 1) == 1;
+            if (!active && !"admin".equals(role)) continue;
 
             shown++;
             content.addView(customerCard(customer));
         }
 
         if (shown == 0) {
-            TextView empty = text("مشتری مطابق جستجو یا فیلتر پیدا نشد.", 13, muted, false);
+            TextView empty = text("مشتری پیدا نشد.", 13, muted, false);
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(dp(10), dp(32), dp(10), dp(32));
             content.addView(empty);
