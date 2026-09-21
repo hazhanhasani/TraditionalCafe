@@ -13,7 +13,7 @@ const JSON_HEADERS = {
 const encoder = new TextEncoder();
 const PASSWORD_KDF_ITERATIONS = 5000;
 const IRAN_TIME_ZONE = "Asia/Tehran";
-const API_VERSION = "1.3.0";
+const API_VERSION = "1.4.0";
 const ROLE_PERMISSION_KEYS = [
   "view_all_orders",
   "manage_catalog",
@@ -294,7 +294,7 @@ function auditCategory(action) {
   if ([
     "open_order","add_order_item","update_order_item_qty","delete_order_item",
     "settle_order","reverse_settlement","cancel_order","merge_orders",
-    "transfer_order","hard_delete_order"
+    "transfer_order","hard_delete_order","sync_offline_order"
   ].includes(value)) return "sales";
 
   if ([
