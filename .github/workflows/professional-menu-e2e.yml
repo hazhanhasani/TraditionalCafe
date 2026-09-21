@@ -21,14 +21,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      API_BASE: https://traditionalcafe.hazhanhasani4268-0f9.workers.dev
-      CAFE_SETUP_KEY: ${{ secrets.CAFE_SETUP_KEY }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_BASE: http://127.0.0.1:8787
+      CAFE_SETUP_KEY: traditionalcafe-local-e2e-key
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Start isolated local Worker
+        shell: bash
+        run: bash .github/scripts/start-local-e2e.sh
 
       - name: Test categorized professional menu
         shell: bash
@@ -124,42 +126,13 @@ jobs:
           });
           NODE
 
-      - name: Cleanup menu test records
+      - name: Stop isolated local Worker
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
-          SUFFIX="${GITHUB_RUN_ID}${GITHUB_RUN_ATTEMPT}"
-          USERNAME="menu${SUFFIX}"
-          TABLE="E2E-MENU-${SUFFIX}"
-          DRINK_CATEGORY="E2E-Hot-${SUFFIX}"
-          FOOD_CATEGORY="E2E-Food-${SUFFIX}"
-          DRINK="E2E-Tea-${SUFFIX}"
-          FOOD="E2E-Snack-${SUFFIX}"
-
-          npx --yes wrangler@latest d1 execute DB --remote --command "
-          DELETE FROM customer_ledger WHERE order_id IN (
-            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id WHERE t.name='$TABLE'
-          );
-          DELETE FROM payments WHERE order_id IN (
-            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id WHERE t.name='$TABLE'
-          );
-          DELETE FROM inventory_movements WHERE order_id IN (
-            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id WHERE t.name='$TABLE'
-          );
-          DELETE FROM order_items WHERE order_id IN (
-            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id WHERE t.name='$TABLE'
-          );
-          DELETE FROM orders WHERE table_id IN (SELECT id FROM cafe_tables WHERE name='$TABLE');
-          DELETE FROM cafe_tables WHERE name='$TABLE';
-          DELETE FROM catalog_inventory_links WHERE catalog_type='service' AND catalog_id IN (
-            SELECT id FROM service_catalog WHERE name IN ('$DRINK','$FOOD')
-          );
-          DELETE FROM service_catalog WHERE name IN ('$DRINK','$FOOD');
-          DELETE FROM catalog_categories WHERE name IN ('$DRINK_CATEGORY','$FOOD_CATEGORY');
-          DELETE FROM backup_snapshots WHERE created_by IN (SELECT id FROM users WHERE username='$USERNAME');
-          DELETE FROM cash_shifts WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
-          DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
-          DELETE FROM audit_logs WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
-          DELETE FROM users WHERE username='$USERNAME';
-          "
+          if [ -f "$RUNNER_TEMP/traditionalcafe-wrangler.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/traditionalcafe-wrangler.pid")" 2>/dev/null || true
+          fi
+          if [ "${{ job.status }}" != "success" ]; then
+            cat "$RUNNER_TEMP/traditionalcafe-wrangler.log" || true
+          fi
