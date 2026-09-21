@@ -4036,8 +4036,8 @@ async function route(request, env) {
 
     const creditLimit = canManageLimits ? intAmount(data.credit_limit || 0) : 0;
     const dueDays = canManageLimits
-      ? Math.max(0, Math.min(3650, Math.round(Number(data.due_days ?? 30))))
-      : 30;
+      ? Math.max(0, Math.min(3650, Math.round(Number(data.due_days ?? 0))))
+      : 0;
 
     const openingDebt = intAmount(data.opening_debt || 0);
     const openingDebtAgeDays = Math.max(
