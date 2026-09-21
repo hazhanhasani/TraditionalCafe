@@ -63,6 +63,9 @@
             android:name=".OfflineCenterActivity"
             android:exported="false" />
         <activity
+            android:name=".MoreToolsActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity
