@@ -120,13 +120,9 @@ public class ReceiptSettingsActivity extends Activity {
         address = field("آدرس");
         footer = field("متن انتهای رسید");
 
-        content.addView(label("نام مجموعه"));
         content.addView(businessName);
-        content.addView(label("شماره تماس"));
         content.addView(phone);
-        content.addView(label("آدرس"));
         content.addView(address);
-        content.addView(label("متن انتهای رسید"));
         content.addView(footer);
 
         Button save = new Button(this);
@@ -219,8 +215,8 @@ public class ReceiptSettingsActivity extends Activity {
     }
 
     private EditText field(String hint) {
-        EditText input = new LabeledEditText(this);
-        input.setHint(hint);
+        LabeledEditText input = new LabeledEditText(this);
+        input.setFieldLabel(hint);
         input.setTextSize(14);
         input.setTextColor(ink);
         input.setHintTextColor(muted);
