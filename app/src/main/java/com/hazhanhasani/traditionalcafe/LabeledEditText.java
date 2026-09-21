@@ -36,9 +36,8 @@ public class LabeledEditText extends EditText {
         super(context, attrs, defStyleAttr);
     }
 
-    @Override
-    public void setHint(CharSequence hint) {
-        fieldLabel = hint == null ? "" : hint;
+    public void setFieldLabel(CharSequence label) {
+        fieldLabel = label == null ? "" : label;
         setContentDescription(fieldLabel);
         super.setHint("");
         updateLabel();
