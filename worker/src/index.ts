@@ -316,7 +316,7 @@ function auditCategory(action) {
     "update_catalog_item","create_hookah"
   ].includes(value)) return "catalog";
 
-  if (["create_customer","update_customer"].includes(value)) return "customers";
+  if (["create_customer","update_customer","customer_opening_debt"].includes(value)) return "customers";
   return "system";
 }
 
