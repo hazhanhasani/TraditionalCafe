@@ -4103,7 +4103,9 @@ async function route(request, env) {
           id,
           "adjustment",
           openingDebt,
-          openingDebtNote || "بدهی قبلی / مانده اولیه هنگام ایجاد مشتری",
+          openingDebtNote
+            ? "بدهی قبلی: " + openingDebtNote
+            : "بدهی قبلی / مانده اولیه هنگام ایجاد مشتری",
           user.id,
           openingCreatedAt,
           openingDueAt
@@ -4132,7 +4134,9 @@ async function route(request, env) {
         amount: openingDebt,
         effective_at: openingCreatedAt,
         due_at: openingDueAt,
-        note: openingDebtNote || "بدهی قبلی / مانده اولیه هنگام ایجاد مشتری",
+        note: openingDebtNote
+          ? "بدهی قبلی: " + openingDebtNote
+          : "بدهی قبلی / مانده اولیه هنگام ایجاد مشتری",
       });
     }
 
