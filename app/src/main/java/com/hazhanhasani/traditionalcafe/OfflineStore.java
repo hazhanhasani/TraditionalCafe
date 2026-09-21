@@ -604,6 +604,10 @@ public final class OfflineStore {
                         sync.put("catalog_type", item.optString("catalog_kind", "service"));
                         sync.put("catalog_id", item.optLong("catalog_id", 0L));
                         sync.put("qty", item.optInt("qty", 1));
+                        if (item.optLong("catalog_id", 0L) <= 0L) {
+                            sync.put("name", item.optString("name", "مورد"));
+                            sync.put("unit_price", item.optLong("unit_price", 0L));
+                        }
                         syncItems.put(sync);
                     }
                     payload.put("items", syncItems);
