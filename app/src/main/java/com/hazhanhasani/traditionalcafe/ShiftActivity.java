@@ -157,17 +157,19 @@ public class ShiftActivity extends Activity {
             renderCurrentShift(shift);
         }
 
-        TextView historyTitle = text(
-                PermissionStore.has(this, "view_all_shifts")
-                        ? "آخرین شیفت‌های کاربران"
-                        : "شیفت‌های قبلی من",
-                17, ink, true
-        );
-        historyTitle.setGravity(Gravity.RIGHT);
-        historyTitle.setPadding(dp(2), dp(22), dp(2), dp(10));
-        content.addView(historyTitle);
+        if (!"staff".equals(role)) {
+            TextView historyTitle = text(
+                    PermissionStore.has(this, "view_all_shifts")
+                            ? "آخرین شیفت‌های کاربران"
+                            : "شیفت‌های قبلی من",
+                    17, ink, true
+            );
+            historyTitle.setGravity(Gravity.RIGHT);
+            historyTitle.setPadding(dp(2), dp(22), dp(2), dp(10));
+            content.addView(historyTitle);
 
-        renderHistory(history);
+            renderHistory(history);
+        }
     }
 
     private void renderClosedState() {
