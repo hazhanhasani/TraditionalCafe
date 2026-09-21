@@ -561,8 +561,8 @@ public class UserManagementActivity extends Activity {
     }
 
     private EditText field(String hint, boolean password) {
-        EditText input = new LabeledEditText(this);
-        input.setHint(hint);
+        LabeledEditText input = new LabeledEditText(this);
+        input.setFieldLabel(hint);
         input.setTextSize(14);
         input.setTextColor(ink);
         input.setHintTextColor(muted);
