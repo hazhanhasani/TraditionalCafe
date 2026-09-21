@@ -52,6 +52,9 @@
             android:name=".BackupRecoveryActivity"
             android:exported="false" />
         <activity
+            android:name=".ReceiptActivity"
+            android:exported="false" />
+        <activity
             android:name=".OrderActivity"
             android:exported="false" />
         <activity
