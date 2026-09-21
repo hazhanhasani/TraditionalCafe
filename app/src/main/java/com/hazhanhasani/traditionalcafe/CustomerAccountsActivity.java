@@ -90,7 +90,7 @@ public class CustomerAccountsActivity extends Activity {
         title.setGravity(Gravity.RIGHT);
         titles.addView(title);
 
-        TextView subtitle = text("بدهی، پرداخت، سقف اعتبار و سررسید", 11, muted, false);
+        TextView subtitle = text("بدهی و پرداخت مشتریان", 11, muted, false);
         subtitle.setGravity(Gravity.RIGHT);
         subtitle.setPadding(0, dp(4), 0, 0);
         titles.addView(subtitle);
@@ -106,7 +106,7 @@ public class CustomerAccountsActivity extends Activity {
         controls.setOrientation(LinearLayout.VERTICAL);
         controls.setPadding(dp(16), dp(2), dp(16), dp(10));
 
-        search = field("جستجو نام، شماره تماس یا یادداشت", false);
+        search = field("جستجو نام یا شماره تماس", false);
         search.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
@@ -124,8 +124,8 @@ public class CustomerAccountsActivity extends Activity {
                 this,
                 android.R.layout.simple_spinner_dropdown_item,
                 PermissionStore.has(this, "manage_customer_limits")
-                        ? new String[]{"همه مشتریان", "بدهکاران", "بدهی معوق", "نزدیک سقف اعتبار", "بدون بدهی", "غیرفعال‌ها"}
-                        : new String[]{"همه مشتریان", "بدهکاران", "بدهی معوق", "نزدیک سقف اعتبار", "بدون بدهی"}
+                        ? new String[]{"همه مشتریان", "بدهکاران", "بدون بدهی", "غیرفعال‌ها"}
+                        : new String[]{"همه مشتریان", "بدهکاران", "بدون بدهی"}
         ));
         filter.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override
@@ -203,22 +203,17 @@ public class CustomerAccountsActivity extends Activity {
 
             String haystack = (
                     customer.optString("name", "") + " " +
-                    customer.optString("phone", "") + " " +
-                    customer.optString("notes", "")
+                    customer.optString("phone", "")
             ).toLowerCase();
 
             if (!q.isEmpty() && !haystack.contains(q)) continue;
 
             long balance = customer.optLong("balance", 0L);
-            long overdue = customer.optLong("overdue_amount", 0L);
-            boolean nearLimit = customer.optBoolean("near_limit", false);
 
             if (mode == 1 && balance <= 0) continue;
-            if (mode == 2 && overdue <= 0) continue;
-            if (mode == 3 && !nearLimit) continue;
-            if (mode == 4 && balance != 0) continue;
-            if (mode == 5 && customer.optInt("active", 1) == 1) continue;
-            if (mode != 5 && customer.optInt("active", 1) == 0) continue;
+            if (mode == 2 && balance != 0) continue;
+            if (mode == 3 && customer.optInt("active", 1) == 1) continue;
+            if (mode != 3 && customer.optInt("active", 1) == 0) continue;
 
             shown++;
             content.addView(customerCard(customer));
@@ -241,8 +236,6 @@ public class CustomerAccountsActivity extends Activity {
 
         addSummaryRow(card, "کل بدهی", money(summary.optLong("total_debt", 0L)), red);
         addSummaryRow(card, "بدهکاران", number(summary.optLong("debtors", 0L)) + " نفر", brown);
-        addSummaryRow(card, "بدهی معوق", money(summary.optLong("overdue_amount", 0L)), red);
-        addSummaryRow(card, "نزدیک سقف اعتبار", number(summary.optLong("near_limit_customers", 0L)) + " نفر", turquoise);
 
         content.addView(card);
     }
@@ -287,45 +280,6 @@ public class CustomerAccountsActivity extends Activity {
         balanceView.setPadding(0, dp(7), 0, 0);
         card.addView(balanceView);
 
-        long limit = customer.optLong("credit_limit", 0L);
-        if (limit > 0) {
-            TextView limitView = text(
-                    "سقف اعتبار: " + money(limit) +
-                            " • اعتبار آزاد: " + money(customer.optLong("remaining_credit", 0L)),
-                    10,
-                    customer.optBoolean("near_limit", false) ? brown : muted,
-                    customer.optBoolean("near_limit", false)
-            );
-            limitView.setGravity(Gravity.RIGHT);
-            limitView.setPadding(0, dp(5), 0, 0);
-            card.addView(limitView);
-        } else {
-            TextView limitView = text("سقف اعتبار مشخص نشده", 10, muted, false);
-            limitView.setGravity(Gravity.RIGHT);
-            limitView.setPadding(0, dp(5), 0, 0);
-            card.addView(limitView);
-        }
-
-        long overdue = customer.optLong("overdue_amount", 0L);
-        if (overdue > 0) {
-            TextView overdueView = text(
-                    "معوق: " + money(overdue) +
-                            " • " + number(customer.optLong("days_overdue", 0L)) + " روز",
-                    11, red, true
-            );
-            overdueView.setGravity(Gravity.RIGHT);
-            overdueView.setPadding(0, dp(6), 0, 0);
-            card.addView(overdueView);
-        }
-
-        String notes = customer.optString("notes", "");
-        if (!notes.isEmpty()) {
-            TextView note = text(notes, 10, muted, false);
-            note.setGravity(Gravity.RIGHT);
-            note.setPadding(0, dp(6), 0, 0);
-            card.addView(note);
-        }
-
         long id = customer.optLong("id");
         String customerName = customer.optString("name", "مشتری");
         card.setOnClickListener(v -> {
@@ -341,105 +295,37 @@ public class CustomerAccountsActivity extends Activity {
     private void showAddCustomer() {
         LinearLayout box = dialogBox();
 
-        TextView help = text(
-                "اگر مشتری از قبل بدهکار است، مبلغ مانده قبلی را همین‌جا وارد کن تا از اولین روز داخل دفتر حساب ثبت شود.",
-                11, muted, false
-        );
-        help.setGravity(Gravity.RIGHT);
-        help.setPadding(dp(4), 0, dp(4), dp(10));
-        box.addView(help);
-
         EditText name = field("نام مشتری", false);
         EditText phone = field("شماره تماس", false);
         phone.setInputType(InputType.TYPE_CLASS_PHONE);
-        EditText notes = field("یادداشت مشتری", false);
+        EditText openingDebt = numberField(
+                "بدهی قبلی (تومان) • صفر = بدون بدهی",
+                "0"
+        );
 
         box.addView(name);
         box.addView(phone);
-        box.addView(notes);
-
-        TextView openingTitle = text("بدهی قبلی مشتری", 14, brown, true);
-        openingTitle.setGravity(Gravity.RIGHT);
-        openingTitle.setPadding(dp(4), dp(8), dp(4), dp(7));
-        box.addView(openingTitle);
-
-        TextView openingHint = text(
-                "اگر این مشتری از قبل بدهکار بوده، مانده قبلی را اینجا ثبت کن. این مبلغ جدا از فروش‌های جدید در گردش حساب ثبت می‌شود.",
-                10, muted, false
-        );
-        openingHint.setGravity(Gravity.RIGHT);
-        openingHint.setPadding(dp(4), 0, dp(4), dp(8));
-        box.addView(openingHint);
-
-        EditText openingDebt = numberField(
-                "مبلغ بدهی قبلی (تومان) • صفر = بدون بدهی",
-                "0"
-        );
-        EditText openingAgeDays = numberField(
-                "چند روز از بدهی قبلی گذشته؟ • صفر = امروز",
-                "0"
-        );
-        EditText openingDebtNote = field(
-                "توضیح بدهی قبلی؛ مثلاً مانده دفتر قدیمی",
-                false
-        );
-
         box.addView(openingDebt);
-        box.addView(openingAgeDays);
-        box.addView(openingDebtNote);
-
-        EditText limit = null;
-        EditText due = null;
-        boolean canManage = PermissionStore.has(this, "manage_customer_limits");
-
-        if (canManage) {
-            TextView creditTitle = text("تنظیمات اعتبار", 13, ink, true);
-            creditTitle.setGravity(Gravity.RIGHT);
-            creditTitle.setPadding(dp(4), dp(5), dp(4), dp(7));
-            box.addView(creditTitle);
-
-            limit = numberField("سقف اعتبار (تومان) • صفر = بدون سقف", "0");
-            due = numberField("مهلت پرداخت (روز) • صفر = بدون سررسید", "30");
-            box.addView(limit);
-            box.addView(due);
-        }
-
-        final EditText finalLimit = limit;
-        final EditText finalDue = due;
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(box);
-        scroll.setFillViewport(true);
 
         new AlertDialog.Builder(this)
-                .setTitle("مشتری دفتری جدید")
-                .setView(scroll)
+                .setTitle("مشتری جدید")
+                .setView(box)
                 .setPositiveButton("ثبت", (d,w) -> new Thread(() -> {
                     try {
-                        long debtValue = parseLong(openingDebt.getText().toString());
-                        long ageDaysValue = parseLong(openingAgeDays.getText().toString());
-
-                        JSONObject body = new JSONObject();
-                        body.put("name", name.getText().toString().trim());
-                        body.put("phone", phone.getText().toString().trim());
-                        body.put("notes", notes.getText().toString().trim());
-                        body.put("opening_debt", debtValue);
-                        body.put("opening_debt_age_days", ageDaysValue);
-                        body.put(
-                                "opening_debt_note",
-                                openingDebtNote.getText().toString().trim()
+                        long debtValue = parseLong(
+                                openingDebt.getText().toString()
                         );
 
-                        if (canManage) {
-                            body.put(
-                                    "credit_limit",
-                                    parseLong(finalLimit.getText().toString())
-                            );
-                            body.put(
-                                    "due_days",
-                                    parseLong(finalDue.getText().toString())
-                            );
-                        }
+                        JSONObject body = new JSONObject();
+                        body.put(
+                                "name",
+                                name.getText().toString().trim()
+                        );
+                        body.put(
+                                "phone",
+                                phone.getText().toString().trim()
+                        );
+                        body.put("opening_debt", debtValue);
 
                         JSONObject response = ApiClient.post(
                                 this,
@@ -456,7 +342,7 @@ public class CustomerAccountsActivity extends Activity {
                                             ? "مشتری با بدهی قبلی " +
                                               money(savedDebt) +
                                               " ثبت شد."
-                                            : "مشتری دفتری ثبت شد.",
+                                            : "مشتری ثبت شد.",
                                     Toast.LENGTH_LONG
                             ).show();
                             reload();
