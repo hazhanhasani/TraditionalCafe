@@ -28,3 +28,47 @@ jobs:
           npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --json --command "SELECT id,username,name,role,active,created_at FROM users WHERE username LIKE 'e2e%' OR username LIKE 'menu%' ORDER BY id DESC LIMIT 40;"
           echo "=== TABLES ==="
           npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --json --command "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"
+
+      - name: Cleanup stale E2E residue
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUFFIX="355423384391"
+          USERNAME="e2e${SUFFIX}"
+          TABLE_A="E2E-A-${SUFFIX}"
+          TABLE_B="E2E-B-${SUFFIX}"
+          SERVICE="E2E-Service-${SUFFIX}"
+          CUSTOMER="E2E-Customer-${SUFFIX}"
+          EXPENSE_DESC="E2E expense ${SUFFIX}"
+
+          npx --yes wrangler@latest d1 execute traditionalcafe-db --remote --command "
+          DELETE FROM backup_snapshots WHERE status='failed';
+          DELETE FROM customer_ledger WHERE customer_id IN (SELECT id FROM customers WHERE name='$CUSTOMER');
+          DELETE FROM customer_ledger WHERE order_id IN (
+            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id
+            WHERE t.name IN ('$TABLE_A','$TABLE_B')
+          );
+          DELETE FROM payments WHERE order_id IN (
+            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id
+            WHERE t.name IN ('$TABLE_A','$TABLE_B')
+          );
+          DELETE FROM inventory_movements WHERE order_id IN (
+            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id
+            WHERE t.name IN ('$TABLE_A','$TABLE_B')
+          );
+          DELETE FROM order_items WHERE order_id IN (
+            SELECT o.id FROM orders o JOIN cafe_tables t ON t.id=o.table_id
+            WHERE t.name IN ('$TABLE_A','$TABLE_B')
+          );
+          DELETE FROM orders WHERE table_id IN (
+            SELECT id FROM cafe_tables WHERE name IN ('$TABLE_A','$TABLE_B')
+          );
+          DELETE FROM cafe_tables WHERE name IN ('$TABLE_A','$TABLE_B');
+          DELETE FROM expenses WHERE description='$EXPENSE_DESC';
+          DELETE FROM service_catalog WHERE name='$SERVICE';
+          DELETE FROM customers WHERE name='$CUSTOMER';
+          DELETE FROM cash_shifts WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
+          DELETE FROM audit_logs WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
+          DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE username='$USERNAME');
+          DELETE FROM users WHERE username='$USERNAME';
+          "
