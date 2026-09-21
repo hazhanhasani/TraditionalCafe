@@ -687,8 +687,12 @@ public class DailyReportActivity extends Activity {
                 reportDate.getDayOfMonth()
         );
 
-        EditText input = new EditText(this);
-        input.setHint("مثلاً ۱۴۰۵/۰۶/۳۰");
+        LinearLayout dateBox = new LinearLayout(this);
+        dateBox.setOrientation(LinearLayout.VERTICAL);
+        dateBox.setPadding(dp(8), dp(4), dp(8), 0);
+
+        LabeledEditText input = new LabeledEditText(this);
+        input.setFieldLabel("تاریخ شمسی • مثال: ۱۴۰۵/۰۶/۳۰");
         input.setSingleLine(true);
         input.setText(
                 JalaliDateTime.fa(
@@ -698,11 +702,15 @@ public class DailyReportActivity extends Activity {
         input.setSelectAllOnFocus(true);
         input.setGravity(Gravity.CENTER);
         input.setInputType(InputType.TYPE_CLASS_TEXT);
+        dateBox.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(52)
+        ));
 
         new AlertDialog.Builder(this)
                 .setTitle("انتخاب تاریخ شمسی")
                 .setMessage("تاریخ را به شکل سال/ماه/روز وارد کن.")
-                .setView(input)
+                .setView(dateBox)
                 .setPositiveButton("نمایش گزارش", (d,w) -> {
                     try {
                         String normalized =
