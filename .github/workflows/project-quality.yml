@@ -75,6 +75,18 @@ jobs:
           cp worker/src/index.ts "$RUNNER_TEMP/worker.mjs"
           node --check "$RUNNER_TEMP/worker.mjs"
 
+      - name: Validate persistent form labels
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f app/src/main/java/com/hazhanhasani/traditionalcafe/LabeledEditText.java
+          grep -q 'FORM_STANDARD = "persistent-labels-v1"'             app/src/main/java/com/hazhanhasani/traditionalcafe/LabeledEditText.java
+
+          if grep -R --include='*.java' -n 'new EditText('             app/src/main/java/com/hazhanhasani/traditionalcafe; then
+            echo "All editable form fields must use LabeledEditText so labels stay visible."
+            exit 1
+          fi
+
       - name: Android lint
         run: gradle --no-daemon :app:lintRelease
 
