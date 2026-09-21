@@ -3046,6 +3046,98 @@ async function route(request, env) {
     });
   }
 
+  const receiptRoute = path.match(/^\/api\/orders\/(\d+)\/receipt$/);
+  if (receiptRoute && method === "GET") {
+    const orderId = Number(receiptRoute[1]);
+
+    const order = await env.DB.prepare(
+      `SELECT o.id,o.table_id,o.opened_by,o.closed_by,o.status,
+              o.subtotal,o.discount,o.total,o.notes,o.opened_at,o.closed_at,
+              t.name AS table_name,
+              opener.name AS opened_by_name,
+              closer.name AS closed_by_name
+       FROM orders o
+       JOIN cafe_tables t ON t.id=o.table_id
+       JOIN users opener ON opener.id=o.opened_by
+       LEFT JOIN users closer ON closer.id=o.closed_by
+       WHERE o.id=?`
+    ).bind(orderId).first();
+
+    if (!order) return error("not_found", "سفارش پیدا نشد.", 404);
+    if (user.role === "staff" && Number(order.opened_by) !== Number(user.id)) {
+      return error("forbidden", "شاگرد فقط می‌تواند رسید فروش خودش را مشاهده کند.", 403);
+    }
+    if (order.status !== "settled") {
+      return error("receipt_not_ready", "رسید نهایی فقط بعد از تسویه سفارش قابل صدور است.", 409);
+    }
+
+    const items = await env.DB.prepare(
+      `SELECT id,name,qty,unit_price,catalog_kind,item_type,created_at
+       FROM order_items
+       WHERE order_id=?
+       ORDER BY id`
+    ).bind(orderId).all();
+
+    const payments = await env.DB.prepare(
+      `SELECT p.id,p.method,p.amount,p.customer_id,p.created_at,
+              c.name AS customer_name,c.phone AS customer_phone,
+              u.name AS received_by_name,
+              (
+                SELECT l.due_at
+                FROM customer_ledger l
+                WHERE l.order_id=p.order_id
+                  AND l.customer_id=p.customer_id
+                  AND l.entry_type='debt'
+                ORDER BY l.id DESC
+                LIMIT 1
+              ) AS due_at
+       FROM payments p
+       LEFT JOIN customers c ON c.id=p.customer_id
+       LEFT JOIN users u ON u.id=p.created_by
+       WHERE p.order_id=?
+       ORDER BY p.id`
+    ).bind(orderId).all();
+
+    const paymentTotals = { cash:0, card:0, transfer:0, credit:0 };
+    for (const p of payments.results || []) {
+      if (Object.prototype.hasOwnProperty.call(paymentTotals, p.method)) {
+        paymentTotals[p.method] += Number(p.amount || 0);
+      }
+    }
+
+    const settingsRows = await env.DB.prepare(
+      `SELECT key,value FROM app_settings
+       WHERE key IN ('receipt_business_name','receipt_phone','receipt_address','receipt_footer')`
+    ).all();
+    const settings = {};
+    for (const row of settingsRows.results || []) settings[row.key] = row.value;
+
+    return json({
+      ok: true,
+      receipt: {
+        receipt_number: "TC-" + String(orderId).padStart(6, "0"),
+        order_id: orderId,
+        business_name: settings.receipt_business_name || "کافه سنتی",
+        business_phone: settings.receipt_phone || "",
+        business_address: settings.receipt_address || "",
+        footer: settings.receipt_footer || "از همراهی شما سپاسگزاریم.",
+        table_name: order.table_name,
+        opened_by_name: order.opened_by_name,
+        cashier_name: order.closed_by_name || "",
+        opened_at: order.opened_at,
+        issued_at: order.closed_at,
+        subtotal: Number(order.subtotal || 0),
+        discount: Number(order.discount || 0),
+        total: Number(order.total || 0),
+        notes: order.notes || "",
+        payment_totals: paymentTotals
+      },
+      items: items.results || [],
+      payments: payments.results || [],
+      timezone: IRAN_TIME_ZONE
+    });
+  }
+
   const orderDetail = path.match(/^\/api\/orders\/(\d+)$/);
   if (orderDetail && method === "GET") {
     const orderId = Number(orderDetail[1]);
