@@ -144,6 +144,10 @@ public class OrderActivity extends Activity {
 
         long total = currentOrder.optLong("total", 0L);
         String status = currentOrder.optString("status", "open");
+        boolean offlineLocal =
+                response.optBoolean("_offline_local_order", false) ||
+                currentOrder.optBoolean("offline_local", false);
+        boolean cachedOffline = response.optBoolean("_offline_cache", false);
 
         LinearLayout summary = card();
         TextView s1 = text("جمع سفارش", 12, muted, false);
@@ -165,6 +169,33 @@ public class OrderActivity extends Activity {
             summary.addView(opened);
         }
         content.addView(summary);
+
+        if (offlineLocal || cachedOffline) {
+            LinearLayout offlineCard = card();
+            TextView offlineTitle = text(
+                    offlineLocal
+                            ? "سفارش آفلاین • ذخیره‌شده روی دستگاه"
+                            : "نمایش اطلاعات ذخیره‌شده • اتصال سرور در دسترس نیست",
+                    13,
+                    offlineLocal ? brown : red,
+                    true
+            );
+            offlineTitle.setGravity(Gravity.RIGHT);
+            offlineCard.addView(offlineTitle);
+
+            TextView offlineHint = text(
+                    offlineLocal
+                            ? "آیتم‌ها را می‌توانی ثبت کنی؛ تسویه پس از همگام‌سازی با سرور انجام می‌شود."
+                            : "تغییرات قابل‌صف‌بندی روی دستگاه ذخیره می‌شوند؛ عملیات حساس تا اتصال مستقیم قفل هستند.",
+                    10,
+                    muted,
+                    false
+            );
+            offlineHint.setGravity(Gravity.RIGHT);
+            offlineHint.setPadding(0, dp(6), 0, 0);
+            offlineCard.addView(offlineHint);
+            content.addView(offlineCard);
+        }
 
         if ("open".equals(status)) {
             LinearLayout menuRow1 = new LinearLayout(this);
@@ -204,13 +235,20 @@ public class OrderActivity extends Activity {
         }
 
         if ("open".equals(status)) {
-            Button settle = primaryButton("تسویه سفارش");
-            settle.setOnClickListener(v -> prepareSettlement());
-            content.addView(settle);
+            if (offlineLocal) {
+                Button settle = secondaryButton("تسویه پس از اتصال و همگام‌سازی");
+                settle.setEnabled(false);
+                settle.setAlpha(0.6f);
+                content.addView(settle);
+            } else {
+                Button settle = primaryButton("تسویه سفارش");
+                settle.setOnClickListener(v -> prepareSettlement());
+                content.addView(settle);
 
-            Button manage = secondaryButton("مدیریت سفارش");
-            manage.setOnClickListener(v -> showOrderManagement());
-            content.addView(manage);
+                Button manage = secondaryButton("مدیریت سفارش");
+                manage.setOnClickListener(v -> showOrderManagement());
+                content.addView(manage);
+            }
         } else if ("settled".equals(status)) {
             Button receipt = primaryButton("مشاهده رسید");
             receipt.setOnClickListener(v -> openReceipt());
@@ -267,7 +305,18 @@ public class OrderActivity extends Activity {
                     long itemId = item.optLong("id");
                     String itemName = item.optString("name", "مورد");
                     long currentQty = item.optLong("qty", 1L);
-                    c.setOnClickListener(v -> showItemActions(itemId, itemName, currentQty));
+
+                    if (itemId < 0L && orderId > 0L) {
+                        c.setOnClickListener(v -> Toast.makeText(
+                                this,
+                                "این آیتم هنوز در صف همگام‌سازی است؛ پس از Sync قابل ویرایش خواهد بود.",
+                                Toast.LENGTH_LONG
+                        ).show());
+                    } else {
+                        c.setOnClickListener(v ->
+                                showItemActions(itemId, itemName, currentQty)
+                        );
+                    }
                 }
 
                 content.addView(c);
