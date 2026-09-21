@@ -1,5 +1,6 @@
 package com.hazhanhasani.traditionalcafe;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -78,6 +79,7 @@ public class OfflineCenterActivity extends Activity {
         super.onDestroy();
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private void registerSyncReceiver() {
         IntentFilter filter = new IntentFilter(
                 OfflineSyncManager.ACTION_SYNC_STATE
