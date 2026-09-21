@@ -13,7 +13,7 @@ const JSON_HEADERS = {
 const encoder = new TextEncoder();
 const PASSWORD_KDF_ITERATIONS = 5000;
 const IRAN_TIME_ZONE = "Asia/Tehran";
-const API_VERSION = "1.4.0";
+const API_VERSION = "1.4.1";
 const ROLE_PERMISSION_KEYS = [
   "view_all_orders",
   "manage_catalog",
@@ -4039,8 +4039,31 @@ async function route(request, env) {
       ? Math.max(0, Math.min(3650, Math.round(Number(data.due_days ?? 30))))
       : 30;
 
+    const openingDebt = intAmount(data.opening_debt || 0);
+    const openingDebtAgeDays = Math.max(
+      0,
+      Math.min(3650, Math.round(Number(data.opening_debt_age_days || 0)))
+    );
+    const openingDebtNote = String(data.opening_debt_note || "")
+      .trim()
+      .slice(0, 300);
+
     if (creditLimit === null || !Number.isFinite(dueDays)) {
       return error("invalid_credit_settings", "تنظیمات اعتبار مشتری معتبر نیست.");
+    }
+    if (openingDebt === null || !Number.isFinite(openingDebtAgeDays)) {
+      return error("invalid_opening_debt", "مبلغ یا سابقه بدهی قبلی معتبر نیست.");
+    }
+    if (creditLimit > 0 && openingDebt > creditLimit) {
+      return error(
+        "opening_debt_exceeds_credit_limit",
+        "بدهی قبلی نمی‌تواند بیشتر از سقف اعتبار تعیین‌شده باشد.",
+        409,
+        {
+          opening_debt: openingDebt,
+          credit_limit: creditLimit,
+        }
+      );
     }
 
     const result = await env.DB.prepare(
@@ -4056,12 +4079,62 @@ async function route(request, env) {
     ).run();
 
     const id = Number(result.meta.last_row_id);
+    let openingLedgerId = null;
+    let openingCreatedAt = null;
+    let openingDueAt = null;
+
+    try {
+      if (openingDebt > 0) {
+        openingCreatedAt = new Date(
+          Date.now() - openingDebtAgeDays * 86400000
+        ).toISOString();
+
+        openingDueAt = dueDays > 0
+          ? new Date(
+              Date.parse(openingCreatedAt) + dueDays * 86400000
+            ).toISOString()
+          : null;
+
+        const openingEntry = await env.DB.prepare(
+          `INSERT INTO customer_ledger
+           (customer_id,entry_type,amount,note,created_by,created_at,due_at)
+           VALUES (?,?,?,?,?,?,?)`
+        ).bind(
+          id,
+          "adjustment",
+          openingDebt,
+          openingDebtNote || "بدهی قبلی / مانده اولیه هنگام ایجاد مشتری",
+          user.id,
+          openingCreatedAt,
+          openingDueAt
+        ).run();
+
+        openingLedgerId = Number(openingEntry.meta.last_row_id);
+      }
+    } catch (e) {
+      await env.DB.prepare("DELETE FROM customers WHERE id=?").bind(id).run();
+      throw e;
+    }
+
     await audit(env, user.id, "create_customer", "customer", id, {
       name,
       phone,
       credit_limit: creditLimit,
       due_days: dueDays,
+      opening_debt: openingDebt,
+      opening_debt_age_days: openingDebtAgeDays,
+      opening_ledger_id: openingLedgerId,
     });
+
+    if (openingDebt > 0) {
+      await audit(env, user.id, "customer_opening_debt", "customer", id, {
+        ledger_entry_id: openingLedgerId,
+        amount: openingDebt,
+        effective_at: openingCreatedAt,
+        due_at: openingDueAt,
+        note: openingDebtNote || "بدهی قبلی / مانده اولیه هنگام ایجاد مشتری",
+      });
+    }
 
     return json({
       ok: true,
@@ -4071,6 +4144,12 @@ async function route(request, env) {
       notes,
       credit_limit: creditLimit,
       due_days: dueDays,
+      balance: openingDebt,
+      opening_debt: openingDebt,
+      opening_debt_age_days: openingDebtAgeDays,
+      opening_ledger_id: openingLedgerId,
+      opening_debt_created_at: openingCreatedAt,
+      opening_debt_due_at: openingDueAt,
     }, 201);
   }
 
