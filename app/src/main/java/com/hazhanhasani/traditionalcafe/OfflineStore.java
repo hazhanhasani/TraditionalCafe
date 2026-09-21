@@ -132,6 +132,17 @@ public final class OfflineStore {
         );
     }
 
+    public static synchronized void removeCache(
+            Context context,
+            String path
+    ) {
+        db(context).delete(
+                "response_cache",
+                "cache_key=?",
+                new String[]{cacheKey(context, path)}
+        );
+    }
+
     public static synchronized String enqueue(
             Context context,
             String operationId,
