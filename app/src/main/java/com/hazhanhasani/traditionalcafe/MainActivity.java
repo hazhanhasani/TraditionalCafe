@@ -447,7 +447,12 @@ public class MainActivity extends Activity {
 
         String sessionName = getSharedPreferences("session", MODE_PRIVATE).getString("name", "");
         String sessionRole = getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff");
-        String roleLabel = "admin".equals(sessionRole) ? "مدیر" : ("cashier".equals(sessionRole) ? "صندوق‌دار" : "شاگرد");
+        boolean sessionOwner = getSharedPreferences("session", MODE_PRIVATE).getInt("is_owner", 0) == 1;
+        String roleLabel = sessionOwner
+                ? "مدیر اصلی"
+                : ("admin".equals(sessionRole)
+                        ? "مدیر"
+                        : ("cashier".equals(sessionRole) ? "صندوق‌دار" : "شاگرد"));
         String subtitleValue = sessionName == null || sessionName.isEmpty()
                 ? "داشبورد مدیریت روزانه"
                 : sessionName + " • " + roleLabel;
@@ -928,8 +933,36 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 JSONObject me = ApiClient.get(this, "/api/me");
+                JSONObject meUser = me.optJSONObject("user");
+                boolean identityChanged = false;
+
+                if (meUser != null) {
+                    String currentRole = getSharedPreferences("session", MODE_PRIVATE)
+                            .getString("role", "staff");
+                    int currentOwner = getSharedPreferences("session", MODE_PRIVATE)
+                            .getInt("is_owner", 0);
+                    String resolvedRole = meUser.optString("role", currentRole);
+                    int resolvedOwner = meUser.optInt("is_owner", currentOwner);
+
+                    identityChanged =
+                            !resolvedRole.equals(currentRole) ||
+                            resolvedOwner != currentOwner;
+
+                    getSharedPreferences("session", MODE_PRIVATE)
+                            .edit()
+                            .putString("name", meUser.optString("name", ""))
+                            .putString("username", meUser.optString("username", ""))
+                            .putString("role", resolvedRole)
+                            .putInt("is_owner", resolvedOwner)
+                            .apply();
+                }
+
                 JSONObject permissions = me.optJSONObject("permissions");
-                if (permissions != null && PermissionStore.save(this, permissions)) {
+                boolean permissionsChanged =
+                        permissions != null &&
+                        PermissionStore.save(this, permissions);
+
+                if (permissionsChanged || identityChanged) {
                     runOnUiThread(this::recreate);
                     return;
                 }
