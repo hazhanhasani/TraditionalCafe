@@ -1,6 +1,14 @@
 name: Primary Admin E2E
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "worker/**"
+      - "migrations/**"
+      - ".github/scripts/start-local-e2e.sh"
+      - ".github/workflows/primary-admin-e2e.yml"
   workflow_run:
     workflows:
       - "Deploy Cloudflare Worker"
@@ -17,7 +25,7 @@ concurrency:
 
 jobs:
   e2e:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
