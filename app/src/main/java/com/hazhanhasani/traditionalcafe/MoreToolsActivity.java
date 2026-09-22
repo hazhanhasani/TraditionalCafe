@@ -26,6 +26,7 @@ public class MoreToolsActivity extends Activity {
     private final int green = Color.rgb(62, 135, 95);
 
     private String role;
+    private boolean isOwner;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -33,6 +34,8 @@ public class MoreToolsActivity extends Activity {
 
         role = getSharedPreferences("session", MODE_PRIVATE)
                 .getString("role", "staff");
+        isOwner = getSharedPreferences("session", MODE_PRIVATE)
+                .getInt("is_owner", 0) == 1;
 
         getWindow().setStatusBarColor(bg);
         getWindow().setNavigationBarColor(bg);
@@ -173,14 +176,19 @@ public class MoreToolsActivity extends Activity {
         }
 
         if ("admin".equals(role)) {
-            addSection(content, "تنظیمات مدیر");
-
-            addTool(
+            addSection(
                     content,
-                    "کاربران",
-                    "ساخت مدیر، صندوق‌دار یا شاگرد",
-                    () -> startActivity(new Intent(this, UserManagementActivity.class))
+                    isOwner ? "تنظیمات مدیر اصلی" : "تنظیمات مدیر"
             );
+
+            if (isOwner) {
+                addTool(
+                        content,
+                        "کاربران",
+                        "تعیین مدیر، صندوق‌دار، شاگرد و مدیر اصلی",
+                        () -> startActivity(new Intent(this, UserManagementActivity.class))
+                );
+            }
             addTool(
                     content,
                     "تنظیمات رسید",
@@ -314,6 +322,7 @@ public class MoreToolsActivity extends Activity {
     }
 
     private String roleLabel() {
+        if (isOwner) return "مدیر اصلی";
         if ("admin".equals(role)) return "مدیر";
         if ("cashier".equals(role)) return "صندوق‌دار";
         return "شاگرد";
