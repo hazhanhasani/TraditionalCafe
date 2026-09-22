@@ -13,7 +13,7 @@ const JSON_HEADERS = {
 const encoder = new TextEncoder();
 const PASSWORD_KDF_ITERATIONS = 5000;
 const IRAN_TIME_ZONE = "Asia/Tehran";
-const API_VERSION = "1.4.2";
+const API_VERSION = "1.5.0";
 const ROLE_PERMISSION_KEYS = [
   "view_all_orders",
   "manage_catalog",
@@ -134,7 +134,7 @@ async function auth(request, env) {
   if (!token) return null;
   const tokenHash = await sha256Hex(token);
   const row = await env.DB.prepare(
-    `SELECT u.id, u.username, u.name, u.role, u.active
+    `SELECT u.id, u.username, u.name, u.role, u.active, u.is_owner
      FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP AND u.active = 1
@@ -145,6 +145,14 @@ async function auth(request, env) {
 
 function requireRole(user, roles) {
   return user && roles.includes(user.role);
+}
+
+function isPrimaryAdmin(user) {
+  return Boolean(
+    user &&
+    user.role === "admin" &&
+    Number(user.is_owner || 0) === 1
+  );
 }
 
 function canManageOrder(user, order) {
@@ -288,7 +296,8 @@ async function buildRecipe(env, catalogType, catalogId) {
 function auditCategory(action) {
   const value = String(action || "");
   if ([
-    "setup_user","login","create_user","update_user","update_role_permissions"
+    "setup_user","login","create_user","update_user","update_role_permissions",
+    "transfer_primary_admin"
   ].includes(value)) return "security";
 
   if ([
@@ -324,7 +333,7 @@ function auditSeverity(action) {
   const value = String(action || "");
   if ([
     "hard_delete_order","reverse_settlement","update_role_permissions",
-    "customer_ledger_adjustment","restore_backup"
+    "customer_ledger_adjustment","restore_backup","transfer_primary_admin"
   ].includes(value)) return "critical";
 
   if ([
@@ -1120,10 +1129,18 @@ async function route(request, env) {
     }
 
     let userId;
+    let isOwner = 0;
     try {
+      if (role === "admin") {
+        const owner = await env.DB.prepare(
+          "SELECT id FROM users WHERE is_owner=1 LIMIT 1"
+        ).first();
+        isOwner = owner ? 0 : 1;
+      }
+
       const result = await env.DB.prepare(
-        "INSERT INTO users (username,name,role,pin_hash,pin_salt) VALUES (?,?,?,?,?)",
-      ).bind(username, name, role, passwordHash, salt).run();
+        "INSERT INTO users (username,name,role,pin_hash,pin_salt,is_owner) VALUES (?,?,?,?,?,?)",
+      ).bind(username, name, role, passwordHash, salt, isOwner).run();
       userId = Number(result.meta.last_row_id);
     } catch (e) {
       const existing = await env.DB.prepare(
@@ -1161,12 +1178,17 @@ async function route(request, env) {
       );
     }
 
-    await audit(env, userId, "setup_user", "user", userId, { username, name, role });
+    await audit(env, userId, "setup_user", "user", userId, {
+      username,
+      name,
+      role,
+      is_owner: isOwner
+    });
     const permissions = await rolePermissions(env, role);
     return json({
       ok: true,
       token,
-      user: { id: userId, username, name, role },
+      user: { id: userId, username, name, role, is_owner: isOwner },
       permissions,
       expires_in_days: 30,
     }, 201);
@@ -1177,7 +1199,7 @@ async function route(request, env) {
     const username = String(data.username || "").trim().toLowerCase();
     const password = String(data.password || "");
     const user = await env.DB.prepare(
-      "SELECT id, username, name, role, pin_hash, pin_salt, active FROM users WHERE username = ? COLLATE NOCASE LIMIT 1",
+      "SELECT id, username, name, role, pin_hash, pin_salt, active, is_owner FROM users WHERE username = ? COLLATE NOCASE LIMIT 1",
     ).bind(username).first();
 
     if (!user || Number(user.active) !== 1) {
@@ -1206,7 +1228,13 @@ async function route(request, env) {
     return json({
       ok: true,
       token,
-      user: { id: user.id, username: user.username, name: user.name, role: user.role },
+      user: {
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        role: user.role,
+        is_owner: Number(user.is_owner || 0)
+      },
       permissions,
       expires_in_days: 30,
     });
@@ -1606,9 +1634,11 @@ async function route(request, env) {
   }
 
   if (path === "/api/users" && method === "GET") {
-    if (!requireRole(user, ["admin"])) return error("forbidden", "Admin access required.", 403);
+    if (!isPrimaryAdmin(user)) {
+      return error("primary_admin_required", "مدیریت کاربران فقط در اختیار مدیر اصلی است.", 403);
+    }
     const result = await env.DB.prepare(
-      `SELECT u.id, u.username, u.name, u.role, u.active, u.created_at, u.updated_at,
+      `SELECT u.id, u.username, u.name, u.role, u.active, u.is_owner, u.created_at, u.updated_at,
               (SELECT MAX(a.created_at) FROM audit_logs a
                WHERE a.user_id=u.id AND a.action='login') AS last_login,
               (SELECT MAX(a.created_at) FROM audit_logs a
@@ -1624,7 +1654,9 @@ async function route(request, env) {
   }
 
   if (path === "/api/users" && method === "POST") {
-    if (!requireRole(user, ["admin"])) return error("forbidden", "Admin access required.", 403);
+    if (!isPrimaryAdmin(user)) {
+      return error("primary_admin_required", "ساخت و تعیین کاربران فقط در اختیار مدیر اصلی است.", 403);
+    }
     const data = await bodyJson(request);
     const username = String(data.username || "").trim().toLowerCase();
     const name = String(data.name || username).trim();
@@ -1656,12 +1688,16 @@ async function route(request, env) {
 
   const userMatch = path.match(/^\/api\/users\/(\d+)$/);
   if (userMatch && method === "PATCH") {
-    if (!requireRole(user, ["admin"])) return error("forbidden", "فقط مدیر به مدیریت کاربران دسترسی دارد.", 403);
+    if (!isPrimaryAdmin(user)) {
+      return error("primary_admin_required", "تغییر کاربران فقط در اختیار مدیر اصلی است.", 403);
+    }
 
     const targetId = Number(userMatch[1]);
     const data = await bodyJson(request);
     const target = await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(targetId).first();
     if (!target) return error("not_found", "کاربر پیدا نشد.", 404);
+
+    const targetIsOwner = Number(target.is_owner || 0) === 1;
 
     const username = data.username === undefined
       ? target.username
@@ -1678,6 +1714,14 @@ async function route(request, env) {
     }
     if (!["admin","cashier","staff"].includes(role)) {
       return error("invalid_role", "نقش کاربر معتبر نیست.");
+    }
+
+    if (targetIsOwner && (role !== "admin" || active !== 1)) {
+      return error(
+        "primary_admin_protected",
+        "مدیر اصلی را نمی‌توان غیرفعال یا از نقش مدیر خارج کرد. ابتدا مدیر اصلی را منتقل کنید.",
+        409
+      );
     }
 
     if (targetId === Number(user.id) && active !== 1) {
@@ -1738,12 +1782,12 @@ async function route(request, env) {
 
   const userActivity = path.match(/^\/api\/users\/(\d+)\/activity$/);
   if (userActivity && method === "GET") {
-    if (!requireRole(user, ["admin"])) {
-      return error("forbidden", "فقط مدیر به فعالیت کاربران دسترسی دارد.", 403);
+    if (!isPrimaryAdmin(user)) {
+      return error("primary_admin_required", "فعالیت کاربران فقط برای مدیر اصلی قابل مشاهده است.", 403);
     }
     const targetId = Number(userActivity[1]);
     const target = await env.DB.prepare(
-      "SELECT id, username, name, role, active FROM users WHERE id=?"
+      "SELECT id, username, name, role, active, is_owner FROM users WHERE id=?"
     ).bind(targetId).first();
     if (!target) return error("not_found", "کاربر پیدا نشد.", 404);
 
@@ -1758,9 +1802,83 @@ async function route(request, env) {
     return json({ ok: true, user: target, activity: logs.results || [] });
   }
 
+  const makeOwnerMatch = path.match(/^\/api\/users\/(\d+)\/make-owner$/);
+  if (makeOwnerMatch && method === "POST") {
+    if (!isPrimaryAdmin(user)) {
+      return error(
+        "primary_admin_required",
+        "انتقال مدیر اصلی فقط توسط مدیر اصلی فعلی انجام می‌شود.",
+        403
+      );
+    }
+
+    const targetId = Number(makeOwnerMatch[1]);
+    if (targetId === Number(user.id)) {
+      return error(
+        "already_primary_admin",
+        "این حساب هم‌اکنون مدیر اصلی است.",
+        409
+      );
+    }
+
+    const target = await env.DB.prepare(
+      "SELECT id,username,name,role,active,is_owner FROM users WHERE id=?"
+    ).bind(targetId).first();
+
+    if (!target) {
+      return error("not_found", "کاربر پیدا نشد.", 404);
+    }
+    if (Number(target.active || 0) !== 1) {
+      return error(
+        "inactive_owner_target",
+        "برای تعیین مدیر اصلی، حساب مقصد باید فعال باشد.",
+        409
+      );
+    }
+
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE users SET is_owner=0, updated_at=CURRENT_TIMESTAMP WHERE is_owner=1"
+      ),
+      env.DB.prepare(
+        "UPDATE users SET role='admin', is_owner=1, active=1, updated_at=CURRENT_TIMESTAMP WHERE id=?"
+      ).bind(targetId)
+    ]);
+
+    await env.DB.prepare(
+      "DELETE FROM sessions WHERE user_id=?"
+    ).bind(targetId).run();
+
+    await audit(
+      env,
+      user.id,
+      "transfer_primary_admin",
+      "user",
+      targetId,
+      {
+        previous_owner_id: Number(user.id),
+        new_owner_id: targetId,
+        username: target.username,
+        name: target.name
+      }
+    );
+
+    return json({
+      ok: true,
+      primary_admin: {
+        id: targetId,
+        username: target.username,
+        name: target.name,
+        role: "admin",
+        is_owner: 1
+      },
+      message: "مدیر اصلی با موفقیت منتقل شد."
+    });
+  }
+
   if (path === "/api/role-permissions" && method === "GET") {
-    if (!requireRole(user, ["admin"])) {
-      return error("forbidden", "فقط مدیر به تنظیم مجوز نقش‌ها دسترسی دارد.", 403);
+    if (!isPrimaryAdmin(user)) {
+      return error("primary_admin_required", "تنظیم مجوز نقش‌ها فقط برای مدیر اصلی است.", 403);
     }
 
     return json({
@@ -1777,8 +1895,8 @@ async function route(request, env) {
 
   const permissionRole = path.match(/^\/api\/role-permissions\/(admin|cashier|staff)$/);
   if (permissionRole && method === "PATCH") {
-    if (!requireRole(user, ["admin"])) {
-      return error("forbidden", "فقط مدیر به تنظیم مجوز نقش‌ها دسترسی دارد.", 403);
+    if (!isPrimaryAdmin(user)) {
+      return error("primary_admin_required", "تنظیم مجوز نقش‌ها فقط برای مدیر اصلی است.", 403);
     }
 
     const roleName = permissionRole[1];
@@ -1889,6 +2007,7 @@ async function route(request, env) {
 
     const metrics = {
       active_admins: 0,
+      primary_admins: 0,
       open_orders: 0,
       open_shifts: 0,
       pending_offline_operations: 0,
@@ -1905,6 +2024,13 @@ async function route(request, env) {
         "SELECT COUNT(*) AS count FROM users WHERE role='admin' AND active=1"
       ).first();
       metrics.active_admins = Number(row?.count || 0);
+    } catch {}
+
+    try {
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM users WHERE is_owner=1 AND role='admin' AND active=1"
+      ).first();
+      metrics.primary_admins = Number(row?.count || 0);
     } catch {}
 
     try {
@@ -1993,6 +2119,9 @@ async function route(request, env) {
     }
     if (metrics.active_admins < 1) {
       warnings.push("no_active_admin");
+    }
+    if (metrics.primary_admins !== 1) {
+      warnings.push("invalid_primary_admin_count");
     }
     if (metrics.failed_backups > 0) {
       warnings.push("failed_backups");
