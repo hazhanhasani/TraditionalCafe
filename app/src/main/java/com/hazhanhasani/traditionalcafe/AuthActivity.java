@@ -405,6 +405,7 @@ public class AuthActivity extends Activity {
                 .putString("username", user.optString("username", ""))
                 .putString("name", user.optString("name", ""))
                 .putString("role", user.optString("role", "staff"))
+                .putInt("is_owner", user.optInt("is_owner", 0))
                 .apply();
 
         JSONObject permissions = response.optJSONObject("permissions");
