@@ -1,0 +1,198 @@
+name: Primary Admin E2E
+
+on:
+  workflow_run:
+    workflows:
+      - "Deploy Cloudflare Worker"
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: traditionalcafe-primary-admin-e2e
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_BASE: http://127.0.0.1:8787
+      CAFE_SETUP_KEY: traditionalcafe-local-e2e-key
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start isolated local Worker
+        shell: bash
+        run: bash .github/scripts/start-local-e2e.sh
+
+      - name: Validate primary admin ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const base = process.env.API_BASE;
+          const setupKey = process.env.CAFE_SETUP_KEY;
+          const suffix = process.env.GITHUB_RUN_ID + process.env.GITHUB_RUN_ATTEMPT;
+
+          function assert(condition, message) {
+            if (!condition) throw new Error("ASSERT: " + message);
+          }
+
+          async function call(path, method="GET", body=null, token=null, extra={}) {
+            const headers = {
+              accept: "application/json",
+              "content-type": "application/json",
+              ...extra
+            };
+            if (token) headers.authorization = "Bearer " + token;
+
+            const response = await fetch(base + path, {
+              method,
+              headers,
+              body: body === null ? undefined : JSON.stringify(body)
+            });
+
+            const text = await response.text();
+            let data = {};
+            try { data = text ? JSON.parse(text) : {}; } catch {}
+            return { response, data, text };
+          }
+
+          async function ok(path, method="GET", body=null, token=null, extra={}) {
+            const result = await call(path, method, body, token, extra);
+            if (!result.response.ok) {
+              throw new Error(method + " " + path + " -> " +
+                result.response.status + " " + result.text);
+            }
+            return result;
+          }
+
+          const ownerUsername = "owner" + suffix;
+          const secondUsername = "admin" + suffix;
+          const password = "PrimaryAdmin-" + suffix + "!";
+
+          const setup = await ok(
+            "/api/setup/user",
+            "POST",
+            {
+              username: ownerUsername,
+              name: "Primary Owner " + suffix,
+              password,
+              role: "admin"
+            },
+            null,
+            { "x-setup-key": setupKey }
+          );
+
+          assert(setup.data.user.is_owner === 1, "first admin must become primary admin");
+          const ownerToken = setup.data.token;
+
+          const second = await ok(
+            "/api/users",
+            "POST",
+            {
+              username: secondUsername,
+              name: "Second Admin " + suffix,
+              password,
+              role: "admin"
+            },
+            ownerToken
+          );
+
+          const secondLogin = await ok(
+            "/api/auth/login",
+            "POST",
+            { username: secondUsername, password }
+          );
+          assert(secondLogin.data.user.is_owner === 0, "second admin must not be owner");
+
+          const denied = await call(
+            "/api/users",
+            "GET",
+            null,
+            secondLogin.data.token
+          );
+          assert(denied.response.status === 403, "regular admin must not manage users");
+          assert(
+            denied.data.error === "primary_admin_required",
+            "regular admin denial code mismatch"
+          );
+
+          const transfer = await ok(
+            "/api/users/" + second.data.id + "/make-owner",
+            "POST",
+            {},
+            ownerToken
+          );
+          assert(
+            transfer.data.primary_admin.id === second.data.id,
+            "ownership transfer target mismatch"
+          );
+          assert(
+            transfer.data.primary_admin.is_owner === 1,
+            "transferred admin missing owner flag"
+          );
+
+          const oldOwnerDenied = await call(
+            "/api/users",
+            "GET",
+            null,
+            ownerToken
+          );
+          assert(
+            oldOwnerDenied.response.status === 403,
+            "old owner should become regular admin immediately"
+          );
+
+          const newOwnerLogin = await ok(
+            "/api/auth/login",
+            "POST",
+            { username: secondUsername, password }
+          );
+          assert(
+            newOwnerLogin.data.user.is_owner === 1,
+            "new owner login missing owner flag"
+          );
+
+          const users = await ok(
+            "/api/users",
+            "GET",
+            null,
+            newOwnerLogin.data.token
+          );
+
+          const ownerRows = users.data.users.filter(
+            (u) => Number(u.is_owner || 0) === 1
+          );
+          assert(ownerRows.length === 1, "there must be exactly one primary admin");
+          assert(
+            ownerRows[0].username === secondUsername,
+            "wrong user is primary admin"
+          );
+
+          console.log("PRIMARY_ADMIN_E2E_OK", {
+            ownerCreated: true,
+            regularAdminDenied: true,
+            ownershipTransferred: true,
+            oldOwnerRevoked: true,
+            singleOwnerGuaranteed: true
+          });
+          NODE
+
+      - name: Stop isolated local Worker
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/traditionalcafe-wrangler.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/traditionalcafe-wrangler.pid")" 2>/dev/null || true
+          fi
+          if [ "${{ job.status }}" != "success" ]; then
+            cat "$RUNNER_TEMP/traditionalcafe-wrangler.log" || true
+          fi
