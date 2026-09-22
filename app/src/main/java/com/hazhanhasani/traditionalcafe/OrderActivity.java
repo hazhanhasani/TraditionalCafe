@@ -866,143 +866,299 @@ public class OrderActivity extends Activity {
     }
 
     private void showSettlementDialog(JSONArray customers) {
-        long total = currentOrder == null ? 0L : currentOrder.optLong("total", 0L);
+        long total = currentOrder == null
+                ? 0L
+                : currentOrder.optLong("total", 0L);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(true);
+        scroll.setScrollbarFadingEnabled(false);
+        scroll.setPadding(dp(4), 0, dp(4), dp(8));
 
         LinearLayout box = dialogBox();
+        scroll.addView(
+                box,
+                new ScrollView.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+        );
 
-        TextView totalView = text("مبلغ قابل تسویه: " + money(total), 15, turquoise, true);
+        TextView totalView = text(
+                "مبلغ قابل تسویه: " + money(total),
+                16,
+                turquoise,
+                true
+        );
         totalView.setGravity(Gravity.RIGHT);
-        totalView.setPadding(0, 0, 0, dp(10));
+        totalView.setPadding(dp(4), 0, dp(4), dp(10));
         box.addView(totalView);
 
-        EditText discount = numberField("مبلغ تخفیف", "0");
+        EditText discount = settlementNumberField("0");
         if (!PermissionStore.has(this, "apply_discount")) {
             discount.setEnabled(false);
             discount.setAlpha(0.55f);
         }
-        EditText cash = numberField("مبلغ نقدی", "0");
-        EditText card = numberField("مبلغ کارت / کارتخوان", "0");
-        EditText transfer = numberField("مبلغ کارت‌به‌کارت", "0");
-        EditText credit = numberField("مبلغ نسیه", "0");
+
+        EditText cash = settlementNumberField("0");
+        EditText card = settlementNumberField("0");
+        EditText transfer = settlementNumberField("0");
+        EditText credit = settlementNumberField("0");
 
         addLabeledNumberField(
                 box,
                 "تخفیف",
                 PermissionStore.has(this, "apply_discount")
-                        ? "از مبلغ کل کم می‌شود"
-                        : "مجوز ثبت تخفیف برای این نقش فعال نیست",
+                        ? "در صورت نیاز از مبلغ کل کم می‌شود."
+                        : "برای این حساب اجازه تخفیف فعال نیست.",
                 discount
         );
-        addLabeledNumberField(box, "نقدی", "مبلغی که نقد دریافت شده", cash);
-        addLabeledNumberField(box, "کارت / کارتخوان", "پرداخت با دستگاه کارتخوان", card);
-        addLabeledNumberField(box, "کارت‌به‌کارت", "واریز مستقیم به کارت", transfer);
-        addLabeledNumberField(box, "نسیه / حساب دفتری", "برای این مبلغ باید مشتری انتخاب شود", credit);
+        addLabeledNumberField(
+                box,
+                "نقدی",
+                "مبلغ دریافت‌شده به‌صورت نقد.",
+                cash
+        );
+        addLabeledNumberField(
+                box,
+                "کارت / کارتخوان",
+                "مبلغ پرداخت‌شده با کارتخوان.",
+                card
+        );
+        addLabeledNumberField(
+                box,
+                "کارت‌به‌کارت",
+                "مبلغ واریزشده مستقیم به کارت.",
+                transfer
+        );
+        addLabeledNumberField(
+                box,
+                "نسیه / بدهی مشتری",
+                "اگر بخشی نسیه است، مبلغ را وارد و سپس بدهکار را انتخاب کن.",
+                credit
+        );
 
         List<Long> customerIds = new ArrayList<>();
         List<String> customerNames = new ArrayList<>();
-        customerIds.add(0L);
-        customerNames.add("انتخاب مشتری برای نسیه");
+        List<String> customerDisplayNames = new ArrayList<>();
 
         if (customers != null) {
             for (int i = 0; i < customers.length(); i++) {
-                JSONObject c = customers.optJSONObject(i);
-                if (c == null) continue;
-                customerIds.add(c.optLong("id"));
+                JSONObject customer = customers.optJSONObject(i);
+                if (customer == null) continue;
 
-                long balance = c.optLong("balance", 0L);
-                long limit = c.optLong("credit_limit", 0L);
-                long remaining = c.optLong("remaining_credit", 0L);
-                long overdue = c.optLong("overdue_amount", 0L);
+                long id = customer.optLong("id", 0L);
+                if (id <= 0L) continue;
 
-                String label = c.optString("name", "مشتری") +
-                        " • بدهی " + money(balance);
+                String name = customer.optString("name", "مشتری");
+                long balance = customer.optLong("balance", 0L);
 
-                if (limit > 0) {
-                    label += " • اعتبار آزاد " + money(remaining);
-                } else {
-                    label += " • بدون سقف مشخص";
-                }
-
-                if (overdue > 0) {
-                    label += " • معوق";
-                }
-
-                customerNames.add(label);
+                customerIds.add(id);
+                customerNames.add(name);
+                customerDisplayNames.add(
+                        name + " • مانده بدهی: " + money(balance)
+                );
             }
         }
 
-        TextView customerLabel = text("مشتری نسیه", 13, ink, true);
+        TextView customerLabel = text(
+                "بدهکار / مشتری",
+                13,
+                ink,
+                true
+        );
         customerLabel.setGravity(Gravity.RIGHT);
-        customerLabel.setPadding(dp(4), dp(8), dp(4), dp(6));
+        customerLabel.setPadding(dp(4), dp(10), dp(4), dp(4));
         box.addView(customerLabel);
 
         TextView customerHint = text(
-                "فقط وقتی مبلغ نسیه بیشتر از صفر است، مشتری را انتخاب کن.",
-                10, muted, false
+                "برای مبلغ نسیه، نام مشتری را انتخاب کن.",
+                10,
+                muted,
+                false
         );
         customerHint.setGravity(Gravity.RIGHT);
         customerHint.setPadding(dp(4), 0, dp(4), dp(6));
         box.addView(customerHint);
 
-        Spinner customerSpinner = new Spinner(this);
-        customerSpinner.setAdapter(new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_dropdown_item, customerNames
-        ));
-        customerSpinner.setBackground(rounded(Color.rgb(247,243,235), 14));
-        box.addView(customerSpinner, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(54)
-        ));
+        long[] selectedCustomerId = new long[]{0L};
+        String[] selectedCustomerName = new String[]{""};
 
-        new AlertDialog.Builder(this)
+        Button customerButton = secondaryButton(
+                customerIds.isEmpty()
+                        ? "مشتری دفتری ثبت نشده"
+                        : "انتخاب بدهکار"
+        );
+        customerButton.setEnabled(!customerIds.isEmpty());
+        customerButton.setAlpha(
+                customerIds.isEmpty() ? 0.55f : 1f
+        );
+
+        customerButton.setOnClickListener(v -> {
+            String[] items = customerDisplayNames.toArray(new String[0]);
+
+            new AlertDialog.Builder(this)
+                    .setTitle("انتخاب بدهکار")
+                    .setItems(items, (dialog, which) -> {
+                        if (
+                                which < 0 ||
+                                which >= customerIds.size()
+                        ) {
+                            return;
+                        }
+
+                        selectedCustomerId[0] =
+                                customerIds.get(which);
+                        selectedCustomerName[0] =
+                                customerNames.get(which);
+
+                        customerButton.setText(
+                                "بدهکار: " +
+                                selectedCustomerName[0]
+                        );
+                    })
+                    .setNegativeButton("لغو", null)
+                    .show();
+        });
+
+        box.addView(customerButton);
+
+        AlertDialog settlementDialog = new AlertDialog.Builder(this)
                 .setTitle("تسویه چندروشی")
-                .setView(box)
+                .setView(scroll)
                 .setPositiveButton("ثبت تسویه", (d,w) -> {
                     new Thread(() -> {
                         try {
-                            long discountValue = parseLong(discount.getText().toString());
-                            long cashValue = parseLong(cash.getText().toString());
-                            long cardValue = parseLong(card.getText().toString());
-                            long transferValue = parseLong(transfer.getText().toString());
-                            long creditValue = parseLong(credit.getText().toString());
+                            long discountValue =
+                                    parseLong(discount.getText().toString());
+                            long cashValue =
+                                    parseLong(cash.getText().toString());
+                            long cardValue =
+                                    parseLong(card.getText().toString());
+                            long transferValue =
+                                    parseLong(transfer.getText().toString());
+                            long creditValue =
+                                    parseLong(credit.getText().toString());
 
-                            long expected = Math.max(0, total - discountValue);
-                            long paid = cashValue + cardValue + transferValue + creditValue;
+                            long expected = Math.max(
+                                    0,
+                                    total - discountValue
+                            );
+                            long paid =
+                                    cashValue +
+                                    cardValue +
+                                    transferValue +
+                                    creditValue;
+
                             if (paid != expected) {
                                 throw new IllegalArgumentException(
-                                        "جمع روش‌های پرداخت باید دقیقاً " + money(expected) + " باشد."
+                                        "جمع روش‌های پرداخت باید دقیقاً " +
+                                        money(expected) +
+                                        " باشد."
                                 );
                             }
 
                             JSONArray payments = new JSONArray();
-                            if (cashValue > 0) payments.put(payment("cash", cashValue, null));
-                            if (cardValue > 0) payments.put(payment("card", cardValue, null));
-                            if (transferValue > 0) payments.put(payment("transfer", transferValue, null));
+
+                            if (cashValue > 0) {
+                                payments.put(
+                                        payment(
+                                                "cash",
+                                                cashValue,
+                                                null
+                                        )
+                                );
+                            }
+
+                            if (cardValue > 0) {
+                                payments.put(
+                                        payment(
+                                                "card",
+                                                cardValue,
+                                                null
+                                        )
+                                );
+                            }
+
+                            if (transferValue > 0) {
+                                payments.put(
+                                        payment(
+                                                "transfer",
+                                                transferValue,
+                                                null
+                                        )
+                                );
+                            }
+
                             if (creditValue > 0) {
-                                int pos = customerSpinner.getSelectedItemPosition();
-                                long customerId = pos >= 0 && pos < customerIds.size()
-                                        ? customerIds.get(pos) : 0L;
-                                if (customerId <= 0) {
-                                    throw new IllegalArgumentException("برای مبلغ نسیه، مشتری دفتری را انتخاب کن.");
+                                if (selectedCustomerId[0] <= 0L) {
+                                    throw new IllegalArgumentException(
+                                            "برای مبلغ نسیه، بدهکار را انتخاب کن."
+                                    );
                                 }
-                                payments.put(payment("credit", creditValue, customerId));
+
+                                payments.put(
+                                        payment(
+                                                "credit",
+                                                creditValue,
+                                                selectedCustomerId[0]
+                                        )
+                                );
                             }
 
                             JSONObject body = new JSONObject();
                             body.put("discount", discountValue);
                             body.put("payments", payments);
 
-                            ApiClient.post(this, "/api/orders/" + orderId + "/settle", body);
+                            ApiClient.post(
+                                    this,
+                                    "/api/orders/" + orderId + "/settle",
+                                    body
+                            );
+
                             runOnUiThread(() -> {
-                                Toast.makeText(this, "سفارش تسویه شد.", Toast.LENGTH_LONG).show();
+                                Toast.makeText(
+                                        this,
+                                        "سفارش تسویه شد.",
+                                        Toast.LENGTH_LONG
+                                ).show();
                                 openReceipt();
                             });
                         } catch (Exception e) {
-                            runOnUiThread(() -> showError(e.getMessage()));
+                            runOnUiThread(() ->
+                                    showError(e.getMessage())
+                            );
                         }
                     }).start();
                 })
                 .setNegativeButton("لغو", null)
-                .show();
+                .create();
+
+        settlementDialog.setOnShowListener(dialog -> {
+            if (settlementDialog.getWindow() != null) {
+                settlementDialog.getWindow().setSoftInputMode(
+                        android.view.WindowManager.LayoutParams
+                                .SOFT_INPUT_ADJUST_RESIZE
+                );
+            }
+
+            int maxHeight = (int) (
+                    getResources()
+                            .getDisplayMetrics()
+                            .heightPixels * 0.68f
+            );
+
+            ViewGroup.LayoutParams params =
+                    scroll.getLayoutParams();
+
+            if (params != null) {
+                params.height = maxHeight;
+                scroll.setLayoutParams(params);
+            }
+        });
+
+        settlementDialog.show();
     }
 
     private void openReceipt() {
@@ -1045,6 +1201,31 @@ public class OrderActivity extends Activity {
         e.setSelectAllOnFocus(true);
         e.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
         return e;
+    }
+
+    private EditText settlementNumberField(String value) {
+        LabeledEditText input = new LabeledEditText(this);
+        input.setTextSize(16);
+        input.setTextColor(ink);
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setText(value);
+        input.setSelectAllOnFocus(true);
+        input.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        input.setPadding(dp(14), 0, dp(14), 0);
+        input.setBackground(
+                rounded(Color.rgb(250,248,244), 14)
+        );
+
+        LinearLayout.LayoutParams lp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(52)
+                );
+        lp.bottomMargin = dp(6);
+        input.setLayoutParams(lp);
+
+        return input;
     }
 
     private void showError(String message) {
