@@ -48,8 +48,13 @@ public class UserManagementActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         String role = getSharedPreferences("session", MODE_PRIVATE).getString("role", "staff");
-        if (!"admin".equals(role)) {
-            Toast.makeText(this, "مدیریت کاربران فقط برای مدیر فعال است.", Toast.LENGTH_LONG).show();
+        boolean owner = getSharedPreferences("session", MODE_PRIVATE).getInt("is_owner", 0) == 1;
+        if (!"admin".equals(role) || !owner) {
+            Toast.makeText(
+                    this,
+                    "مدیریت کاربران فقط در اختیار مدیر اصلی است.",
+                    Toast.LENGTH_LONG
+            ).show();
             finish();
             return;
         }
@@ -144,7 +149,27 @@ public class UserManagementActivity extends Activity {
             try {
                 JSONObject me = ApiClient.get(this, "/api/me");
                 JSONObject meUser = me.optJSONObject("user");
-                if (meUser != null) currentUserId = meUser.optLong("id", 0L);
+                if (meUser != null) {
+                    currentUserId = meUser.optLong("id", 0L);
+                    int owner = meUser.optInt("is_owner", 0);
+                    getSharedPreferences("session", MODE_PRIVATE)
+                            .edit()
+                            .putInt("is_owner", owner)
+                            .putString("role", meUser.optString("role", "staff"))
+                            .apply();
+
+                    if (owner != 1) {
+                        runOnUiThread(() -> {
+                            Toast.makeText(
+                                    this,
+                                    "این بخش فقط برای مدیر اصلی است.",
+                                    Toast.LENGTH_LONG
+                            ).show();
+                            finish();
+                        });
+                        return;
+                    }
+                }
 
                 JSONObject response = ApiClient.get(this, "/api/users");
                 JSONArray users = response.optJSONArray("users");
@@ -160,7 +185,7 @@ public class UserManagementActivity extends Activity {
         content.removeAllViews();
 
         TextView info = text(
-                "مدیر دسترسی کامل دارد. شاگرد فقط فروش شخصی و نسیه را مدیریت می‌کند. مجوزهای عملیاتی صندوق‌دار قابل تنظیم است.",
+                "مدیر اصلی کاربران را تعیین می‌کند. مدیر عادی دسترسی مدیریتی دارد اما نمی‌تواند نقش کاربران یا مدیر اصلی را تغییر دهد.",
                 11, muted, false
         );
         info.setGravity(Gravity.RIGHT);
@@ -190,9 +215,14 @@ public class UserManagementActivity extends Activity {
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
             ));
 
+            boolean primaryAdmin = user.optInt("is_owner", 0) == 1;
             TextView nameView = text(
-                    user.optString("name", "کاربر") + (id == currentUserId ? " • حساب فعلی" : ""),
-                    16, ink, true
+                    user.optString("name", "کاربر") +
+                            (primaryAdmin ? " • مدیر اصلی" : "") +
+                            (id == currentUserId ? " • حساب فعلی" : ""),
+                    16,
+                    primaryAdmin ? turquoise : ink,
+                    true
             );
             nameView.setGravity(Gravity.RIGHT);
             textBox.addView(nameView);
@@ -234,13 +264,39 @@ public class UserManagementActivity extends Activity {
     }
 
     private void showUserActions(JSONObject user) {
-        String[] options = new String[]{"ویرایش حساب", "تغییر رمز عبور", "مشاهده فعالیت‌ها"};
+        boolean primaryAdmin = user.optInt("is_owner", 0) == 1;
+        boolean canTransfer =
+                !primaryAdmin &&
+                user.optInt("active", 1) == 1;
+
+        String[] options = canTransfer
+                ? new String[]{
+                        "ویرایش حساب",
+                        "تغییر رمز عبور",
+                        "مشاهده فعالیت‌ها",
+                        "تعیین به‌عنوان مدیر اصلی"
+                }
+                : new String[]{
+                        "ویرایش حساب",
+                        "تغییر رمز عبور",
+                        "مشاهده فعالیت‌ها"
+                };
+
         new AlertDialog.Builder(this)
-                .setTitle(user.optString("name", "کاربر"))
+                .setTitle(
+                        user.optString("name", "کاربر") +
+                        (primaryAdmin ? " • مدیر اصلی" : "")
+                )
                 .setItems(options, (dialog, which) -> {
-                    if (which == 0) showEditDialog(user);
-                    else if (which == 1) showPasswordDialog(user);
-                    else showActivity(user);
+                    if (which == 0) {
+                        showEditDialog(user);
+                    } else if (which == 1) {
+                        showPasswordDialog(user);
+                    } else if (which == 2) {
+                        showActivity(user);
+                    } else {
+                        confirmPrimaryAdminTransfer(user);
+                    }
                 })
                 .setNegativeButton("بستن", null)
                 .show();
@@ -307,6 +363,14 @@ public class UserManagementActivity extends Activity {
         active.setTextColor(ink);
         active.setChecked(user.optInt("active", 1) == 1);
 
+        boolean primaryAdmin = user.optInt("is_owner", 0) == 1;
+        if (primaryAdmin) {
+            role.setSelection(2);
+            role.setEnabled(false);
+            active.setChecked(true);
+            active.setEnabled(false);
+        }
+
         box.addView(name);
         box.addView(username);
         TextView roleTitle = text("نقش", 12, ink, true);
@@ -371,6 +435,47 @@ public class UserManagementActivity extends Activity {
                         }
                     }).start();
                 })
+                .setNegativeButton("لغو", null)
+                .show();
+    }
+
+    private void confirmPrimaryAdminTransfer(JSONObject user) {
+        String name = user.optString("name", "کاربر");
+
+        new AlertDialog.Builder(this)
+                .setTitle("تعیین مدیر اصلی")
+                .setMessage(
+                        "آیا مطمئن هستید «" + name + "» مدیر اصلی شود؟\n\n" +
+                        "پس از انتقال، فقط این حساب امکان تعیین و مدیریت کاربران را خواهد داشت. " +
+                        "حساب فعلی شما مدیر عادی باقی می‌ماند."
+                )
+                .setPositiveButton("انتقال مدیر اصلی", (dialog, which) ->
+                        new Thread(() -> {
+                            try {
+                                ApiClient.post(
+                                        this,
+                                        "/api/users/" + user.optLong("id") + "/make-owner",
+                                        new JSONObject()
+                                );
+
+                                getSharedPreferences("session", MODE_PRIVATE)
+                                        .edit()
+                                        .putInt("is_owner", 0)
+                                        .apply();
+
+                                runOnUiThread(() -> {
+                                    Toast.makeText(
+                                            this,
+                                            name + " به‌عنوان مدیر اصلی تعیین شد.",
+                                            Toast.LENGTH_LONG
+                                    ).show();
+                                    finish();
+                                });
+                            } catch (Exception e) {
+                                runOnUiThread(() -> showError(e.getMessage()));
+                            }
+                        }).start()
+                )
                 .setNegativeButton("لغو", null)
                 .show();
     }
@@ -535,6 +640,7 @@ public class UserManagementActivity extends Activity {
         if ("create_user".equals(action)) return "ساخت کاربر";
         if ("update_user".equals(action)) return "ویرایش کاربر";
         if ("update_role_permissions".equals(action)) return "تغییر مجوز نقش";
+        if ("transfer_primary_admin".equals(action)) return "انتقال مدیر اصلی";
         return action == null || action.isEmpty() ? "فعالیت" : action;
     }
 
